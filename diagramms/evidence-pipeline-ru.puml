@@ -1,0 +1,44 @@
+@startuml
+title Конвейер обработки evidence
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+
+rectangle "Ограниченный сбор источников" as Collection {
+  component "Snapshot узлов" as Nodes
+  component "Snapshot Kubernetes" as Kubernetes
+  component "Snapshot Prometheus" as Prometheus
+}
+
+database "Исходные evidence в gzip/JSON" as Raw
+component "Нормализация событий,\nклассификация и fingerprints" as Normalize
+component "Корреляция в пределах\n15 минут" as Correlate
+component "Версионируемые\nдетерминированные правила" as Rules
+component "Coverage и извлечение\nинвентаризации узлов" as Facts
+component "Сборка отчёта" as Report
+database "Производные артефакты" as Derived
+component "SHA-256 manifest" as Manifest
+
+Nodes --> Raw
+Kubernetes --> Raw
+Prometheus --> Raw
+Raw --> Normalize
+Normalize --> Correlate
+Correlate --> Rules
+Raw --> Rules : Структурированное состояние
+Raw --> Facts
+Rules --> Report : Факты, корреляции, гипотезы
+Facts --> Report
+Normalize --> Derived : normalized-events.json.gz
+Facts --> Derived : facts.json
+Rules --> Derived : findings.json
+Report --> Derived : report.json и report.md
+Raw --> Manifest
+Derived --> Manifest
+Manifest --> Derived : manifest.json
+
+note right of Rules
+Отсутствующие evidence остаются пробелом coverage
+и не превращаются в совпадение правила.
+end note
+@enduml

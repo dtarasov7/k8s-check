@@ -1,0 +1,55 @@
+@startuml
+title Выполнение аварийного snapshot
+
+skinparam shadowing false
+
+actor Администратор as Operator
+participant "CLI" as CLI
+participant "Оркестратор" as Orchestrator
+participant "ansible-inventory" as Inventory
+participant "SSH-транспорт" as SSH
+participant "Сборщик узла" as Node
+participant "Сборщик Kubernetes" as Kubernetes
+participant "Kubernetes API" as API
+participant "Prometheus" as Prometheus
+participant "Построитель отчёта" as Report
+participant "Создание manifest" as Manifest
+database "Каталог snapshot" as Output
+
+Operator -> CLI : Параметры snapshot
+CLI -> CLI : Загрузка и проверка конфигурации
+CLI -> Orchestrator : run_snapshot(...)
+Orchestrator -> Inventory : --list --export
+Inventory --> Orchestrator : Проверенный список узлов
+Orchestrator -> Orchestrator : Проверка резерва диска\nСборка временного kdiag.pyz
+
+par Каждый узел с ограничением parallelism
+  Orchestrator -> SSH : collect_node(...)
+  SSH -> Node : Копирование kdiag.pyz через SCP
+  SSH -> Node : sudo -n python3.8\nnode-snapshot
+  Node -> Node : Ограниченные read-only проверки
+  Node --> SSH : gzip JSON через stdout
+  SSH -> Output : node-<host>.json.gz
+  SSH -> Node : Удаление временного kdiag.pyz
+end
+
+Orchestrator -> Kubernetes : collect(...)
+par Три группы ограниченных read-only запросов
+  Kubernetes -> API : kubectl get / get --raw
+  API --> Kubernetes : Проекции ресурсов и readiness
+end
+Kubernetes -> API : Разрешённые ограниченные журналы Pod
+API --> Kubernetes : Текущие и предыдущие журналы
+Kubernetes -> Output : kubernetes.json.gz
+
+Orchestrator -> Prometheus : Необязательный ограниченный HTTP-запрос
+Prometheus --> Orchestrator : Evidence или статус недоступности
+Orchestrator -> Output : prometheus.json.gz\ncollection.json
+
+Orchestrator -> Report : build_report(...)
+Report -> Output : Нормализованные события, факты,\nfindings, отчёты JSON и Markdown
+Orchestrator -> Manifest : write_manifest(...)
+Manifest -> Output : manifest.json
+Orchestrator --> CLI : Путь и статус complete/partial
+CLI --> Operator : Путь и код завершения 0/1
+@enduml

@@ -1,0 +1,507 @@
+# kdiag User Guide
+
+## 1. Purpose and scope
+
+<code>kdiag 0.4.0</code> creates a one-time emergency snapshot of a Kubernetes cluster and performs deterministic, fully offline analysis. It is intended for an isolated Kubernetes 1.24 environment with up to 20 nodes and about 1,000 Pods, but most checks are not tied to that exact scale.
+
+The program runs on a separate management server. It connects to every node over SSH, runs read-only inspection through non-interactive sudo, and queries the Kubernetes API using a dedicated kubeconfig. Prometheus is optional: the snapshot still works when Prometheus or the entire Kubernetes API is unavailable.
+
+The current release implements only the **one-time emergency snapshot and inventory** stage. Periodic baseline collection and continuous Kubernetes/log watching are future stages.
+
+No LLM, Internet connection, external Python package, agent, DaemonSet, or database is required. Analysis is performed by a versioned rule pack. The tool does not update Kubernetes, repair the cluster, restart services, change sysctl, or mutate etcd.
+
+## 2. Operating model
+
+The management server is both the collector and the central storage location:
+
+~~~text
+Management server
+  kdiag.pyz + JSON config + Ansible inventory + dedicated kubeconfig
+       |                         |
+       | SSH + sudo -n           | read-only Kubernetes API calls
+       v                         v
+  Kubernetes nodes          Kubernetes API VIP
+       |
+       +-- host facts, configuration, systemd state and journals
+       +-- kubelet/runtime/Cilium/KESL/kernel evidence
+       +-- optional read-only local etcd health inspection
+
+  Result: one collection directory on the management server
+~~~
+
+The workflow is:
+
+1. Validate configuration, disk reserve, inventory, SSH, sudo, and API access.
+2. Collect bounded node and Kubernetes evidence.
+3. Normalize logs and structured Kubernetes states.
+4. Correlate related records in a 15-minute window.
+5. Run deterministic rules and create JSON and Markdown reports.
+6. Generate a manifest with file sizes and SHA-256 hashes.
+
+A node failure or unavailable API normally produces a **partial snapshot** instead of discarding evidence from healthy sources.
+
+## 3. Safety and data classification
+
+The collector uses read-only commands and Kubernetes verbs. Supplied RBAC does not grant Secrets, <code>pods/exec</code>, or mutation verbs. Optional etcd inspection runs only <code>endpoint status</code>, <code>endpoint health</code>, and <code>alarm list</code>; it never writes to etcd.
+
+Standard etcd client certificate paths may be used locally, but private-key contents are not copied into the snapshot. Application Pod logs are disabled unless their namespaces are explicitly allowlisted.
+
+The snapshot is **not anonymized**. It may contain node and object names, namespaces, image names, IP addresses, storage identifiers, Events, selected Pod logs, host journals, configuration values, and certificate subjects/expiry dates. Treat the entire result directory as confidential. Review and redact it before any external transfer.
+
+<code>manifest.json</code> detects accidental or deliberate file changes using SHA-256. It is not a digital signature and does not prove who created the snapshot.
+
+## 4. Requirements
+
+### 4.1 Management server
+
+- Python 3.8.
+- <code>ssh</code>, <code>scp</code>, <code>kubectl</code>, and <code>ansible-inventory</code> in PATH.
+- Ansible inventory containing all target nodes.
+- SSH key access and valid known-host entries.
+- Dedicated Kubernetes identity and kubeconfig.
+- Initially 5 GiB of free storage; the default preserves 1 GiB as a central reserve.
+
+Ansible is used only to resolve inventory and the host name, <code>ansible_host</code>, <code>ansible_user</code>, and <code>ansible_port</code>. kdiag does not run playbooks. Do not assume arbitrary Ansible connection plugins, <code>ansible_ssh_common_args</code>, or <code>ansible_ssh_private_key_file</code> are honored; put required routing/key settings in normal OpenSSH configuration.
+
+### 4.2 Cluster nodes
+
+- Python 3.8 at the configured absolute path; default <code>/usr/bin/python3.8</code>.
+- SSH key access for the management account.
+- Passwordless <code>sudo -n</code> to root.
+- Persistent journald and standard inspection tools such as systemctl, journalctl, sysctl, df, ss, and ip.
+- The target allowance is up to 5 GiB free per node; the default temporary node bundle limit is only 32 MiB.
+
+Temporary node data is removed after a normally completed transfer. Check for leftovers after an interrupted run.
+
+### 4.3 etcd assumptions
+
+Read-only stacked kubeadm etcd inspection is attempted only with these standard paths:
+
+~~~text
+/etc/kubernetes/manifests/etcd.yaml
+/etc/kubernetes/pki/etcd/ca.crt
+/etc/kubernetes/pki/etcd/healthcheck-client.crt
+/etc/kubernetes/pki/etcd/healthcheck-client.key
+~~~
+
+The collector uses host etcdctl, or crictl to invoke etcdctl inside the already running local etcd container. External etcd and non-standard layouts produce an evidence-gap result rather than an invented diagnosis.
+
+## 5. Build, test, and offline transfer
+
+The deliverable is <code>dist/kdiag.pyz</code>, a Python zip application containing only project code and the standard library.
+
+~~~bash
+python3.8 scripts/build.py
+PYTHONPATH=src python3.8 -m unittest discover -s tests -v
+python3.8 dist/kdiag.pyz self-test
+sha256sum dist/kdiag.pyz
+~~~
+
+Transfer the pyz, recorded checksum, reviewed JSON configuration, RBAC manifests, and guides through the approved offline process. Verify after transfer:
+
+~~~bash
+sha256sum kdiag.pyz
+python3.8 kdiag.pyz --version
+python3.8 kdiag.pyz self-test
+~~~
+
+Do not rely on a checksum printed in documentation: a legitimate rebuild changes it.
+
+## 6. Kubernetes identity and RBAC
+
+Use a separate identity even if a super-admin is available for an initial controlled test. The supplied manifest is <code>deploy/kubernetes/kdiag-rbac.yaml</code>. It creates:
+
+- namespace <code>kdiag-system</code> and ServiceAccount <code>kdiag-reader</code>;
+- a read-only ClusterRole and ClusterRoleBinding for structural resources;
+- a Role and RoleBinding for <code>pods/log</code> in <code>kube-system</code>.
+
+Review every binding subject before applying the manifest. Do not add Secret access, pods/exec, or write verbs. Application namespace Roles are not generated automatically: create an equivalent namespaced Role and RoleBinding, bind it to <code>kdiag-system/kdiag-reader</code>, and add only the approved namespace to the configuration.
+
+The enabled collector reads Nodes, Pods, Events, workloads, Services, EndpointSlices, PDBs, PVCs, PVs, APIService, Leases, VolumeAttachments, CSI objects, StorageClasses, NetworkPolicies, selected Cilium CRDs, allowlisted fields from the <code>cilium-config</code> and <code>coredns</code> ConfigMaps, the non-resource URL <code>/readyz</code>, and Pod logs only in approved namespaces.
+
+~~~bash
+kubectl --kubeconfig /secure/kdiag.kubeconfig auth can-i get nodes
+kubectl --kubeconfig /secure/kdiag.kubeconfig auth can-i get /readyz
+kubectl --kubeconfig /secure/kdiag.kubeconfig auth can-i get pods/log -n kube-system
+kubectl --kubeconfig /secure/kdiag.kubeconfig auth can-i get secrets -A
+kubectl --kubeconfig /secure/kdiag.kubeconfig auth can-i create pods -A
+~~~
+
+The first three checks should return yes and the last two no. Create application Role/RoleBinding objects only for explicitly approved namespaces.
+
+## 7. Inventory
+
+Any format understood by the installed ansible-inventory is accepted. Minimal INI example:
+
+~~~ini
+[k8s_nodes]
+cp01 ansible_host=10.10.0.11 ansible_user=kdiag
+cp02 ansible_host=10.10.0.12 ansible_user=kdiag
+worker01 ansible_host=10.10.0.21 ansible_user=kdiag
+~~~
+
+~~~bash
+ansible-inventory -i inventory.ini --list
+ssh cp01 true
+ssh cp01 sudo -n true
+~~~
+
+Verify every connection profile. Do not place passwords or private keys in the snapshot configuration.
+
+## 8. Configuration reference
+
+Copy <code>config/snapshot.example.json</code> to an environment-specific file. The format has <code>schema_version: 1</code>. Invalid values fail preflight with exit code 2.
+
+### 8.1 Collection
+
+| Key | Default | Meaning |
+|---|---:|---|
+| <code>collection.since_hours</code> | 24 | Journal/Event look-back window. |
+| <code>collection.parallelism</code> | 2 | Concurrent node collectors; low by default to limit incident-time load. |
+| <code>collection.command_timeout_seconds</code> | 30 | Default node-command timeout. |
+| <code>collection.max_command_bytes</code> | 1048576 | Captured bytes per command; truncation is recorded. |
+| <code>collection.max_node_bundle_bytes</code> | 33554432 | Maximum compressed bundle accepted per node. |
+| <code>collection.central_reserve_bytes</code> | 1073741824 | Space that must remain free centrally. |
+| <code>collection.pod_log_tail_bytes</code> | 65536 | Tail bytes per direct node CRI log file. |
+| <code>collection.pod_log_total_bytes</code> | 8388608 | Aggregate direct CRI logs per node. |
+| <code>collection.pod_log_max_files</code> | 200 | Maximum direct CRI files per node. |
+| <code>collection.collect_etcd</code> | true | Enable read-only local etcd health/status/alarm collection. |
+
+### 8.2 SSH
+
+| Key | Default | Meaning |
+|---|---:|---|
+| <code>ssh.connect_timeout_seconds</code> | 10 | Connection timeout. |
+| <code>ssh.remote_python</code> | /usr/bin/python3.8 | Absolute node Python path. |
+| <code>ssh.user</code> | null | Optional global user override. |
+| <code>ssh.port</code> | 22 | Optional global port override. |
+
+### 8.3 Kubernetes
+
+| Key | Default | Meaning |
+|---|---:|---|
+| <code>kubernetes.enabled</code> | true | Enable API collection. |
+| <code>kubernetes.kubeconfig</code> | null | Dedicated kubeconfig; CLI can override. |
+| <code>kubernetes.context</code> | null | Optional context. |
+| <code>kubernetes.command_timeout_seconds</code> | 30 | Per-request timeout. |
+| <code>kubernetes.max_wire_bytes</code> | 67108864 | Maximum raw API response. |
+| <code>kubernetes.max_bundle_bytes</code> | 134217728 | Maximum compressed API bundle. |
+| <code>kubernetes.system_namespaces</code> | [kube-system] | Allowlist for system Pod logs. |
+| <code>kubernetes.application_namespaces</code> | [] | Explicit application-log allowlist; empty means none. |
+| <code>kubernetes.collect_system_logs</code> | true | Collect bounded selected system logs. |
+| <code>kubernetes.log_tail_lines</code> | 200 | Requested tail per container. |
+| <code>kubernetes.max_log_pods</code> | 100 | Maximum Pods selected for API logs. |
+| <code>kubernetes.max_log_bytes</code> | 33554432 | Aggregate API Pod-log limit. |
+
+### 8.4 Prometheus
+
+| Key | Default | Meaning |
+|---|---:|---|
+| <code>prometheus.url</code> | null | Optional base URL; null disables it. |
+| <code>prometheus.timeout_seconds</code> | 3 | Short timeout so it cannot block emergency work. |
+| <code>prometheus.max_response_bytes</code> | 1048576 | Maximum response size. |
+
+Prometheus failure is non-fatal.
+
+### 8.5 Initial 5 GiB sizing
+
+Default compressed bundle ceilings for 20 nodes plus Kubernetes total about 768 MiB, before reports and working overhead. They are safety ceilings, not expected usage. Start with defaults and examine <code>manifest.json</code>. If useful evidence is repeatedly truncated, increase only the relevant cap and discuss central expansion. Do not remove the 1 GiB reserve to force a run onto a nearly full filesystem.
+
+## 9. Preflight and execution
+
+~~~bash
+python3.8 dist/kdiag.pyz --version
+python3.8 dist/kdiag.pyz self-test
+python3.8 dist/kdiag.pyz rules list
+ansible-inventory -i inventory.ini --list
+df -h /var/lib/kdiag
+kubectl --kubeconfig /secure/kdiag.kubeconfig get --raw='/readyz?verbose'
+~~~
+
+Also verify SSH, sudo -n, remote Python, and correct time.
+
+Full snapshot:
+
+~~~bash
+python3.8 dist/kdiag.pyz snapshot \
+  --inventory inventory.ini \
+  --group k8s_nodes \
+  --config config/snapshot.json \
+  --kubeconfig /secure/kdiag.kubeconfig \
+  --output-dir /var/lib/kdiag
+~~~
+
+Approved application namespaces are repeatable:
+
+~~~bash
+python3.8 dist/kdiag.pyz snapshot -i inventory.ini -g k8s_nodes \
+  --config config/snapshot.json \
+  --application-namespace app-a \
+  --application-namespace app-b \
+  -o /var/lib/kdiag
+~~~
+
+Node-only capture when the API is unavailable:
+
+~~~bash
+python3.8 dist/kdiag.pyz snapshot -i inventory.ini -g k8s_nodes \
+  --config config/snapshot.json --skip-kubernetes -o /var/lib/kdiag
+~~~
+
+This preserves host evidence but prevents Kubernetes structural checks.
+
+Optional Prometheus can be set with <code>--prometheus-url http://host:9090</code>.
+
+| Exit | Meaning | Response |
+|---:|---|---|
+| 0 | Collection completed. | Read the report and evidence-gap section. |
+| 1 | Partial collection saved. | Preserve it, inspect source statuses, then decide whether to repeat. |
+| 2 | Configuration/preflight failure. | Correct the local problem; do not assume a snapshot exists. |
+
+Never discard a partial snapshot until its replacement covers the same incident window.
+
+## 10. Result directory
+
+Each run creates <code>&lt;output&gt;/&lt;collection-id&gt;/</code>:
+
+| File | Purpose |
+|---|---|
+| <code>collection.json</code> | Identity, timing, version, status, source metadata. |
+| <code>node-&lt;inventory-host&gt;.json.gz</code> | Per-node evidence and command statuses. |
+| <code>kubernetes.json.gz</code> | API resources, readyz output, bounded Pod logs. |
+| <code>prometheus.json.gz</code> | Optional bounded Prometheus evidence. |
+| <code>normalized-events.json.gz</code> | Normalized records/fingerprints/correlations; confidential. |
+| <code>facts.json</code> | Derived facts used by rules. |
+| <code>findings.json</code> | Machine-readable findings. |
+| <code>report.json</code> | Combined machine-readable report. |
+| <code>report.md</code> | Primary operator report. |
+| <code>manifest.json</code> | File sizes and SHA-256 hashes. |
+
+Inventory names and Kubernetes Node names may differ; inconsistent hostname configuration reduces correlation quality.
+
+~~~bash
+python3.8 dist/kdiag.pyz report /var/lib/kdiag/COLLECTION_ID
+python3.8 dist/kdiag.pyz verify /var/lib/kdiag/COLLECTION_ID
+~~~
+
+## 11. Interpretation, normalization, and correlation
+
+Read collection status/evidence gaps first, then facts, correlations, and hypotheses:
+
+- **fact**: directly supported by structured state or a strong deterministic signature;
+- **correlation**: at least two distinct symptoms in the same Node/Pod scope within 15 minutes; not proof of causation;
+- **hypothesis**: suggestive evidence or a valid platform exception is possible; verify before action.
+
+No finding does not mean no problem. Evidence may be outside the time window, truncated, denied, unreachable, unknown to the rule pack, or stored in a non-standard layout.
+
+The normalizer handles journald JSON, direct CRI logs, Kubernetes Events, Node conditions, Pod/container states, selected Pod logs, and systemd states. It retains at most 50,000 categorized records and 100 approximate heavy-hitter fingerprints for unknown messages. Correlation families cover runtime/Node, CNI/Node, probe/network, memory/OOM, storage, cgroup/service, certificate/API, and conntrack/network failures.
+
+## 12. Detailed check catalogue
+
+The artifact contains 93 report rules. Query the exact embedded version with:
+
+~~~bash
+python3.8 dist/kdiag.pyz rules list
+python3.8 dist/kdiag.pyz rules explain kubernetes.node_not_ready
+python3.8 dist/kdiag.pyz rules list --json
+~~~
+
+### 12.1 Collection integrity and inventory
+
+| Rule | Type | What is checked | Safe first response |
+|---|---|---|---|
+| <code>collector.node_gap</code> | fact | Requested node bundle missing, failed, timed out, or unacceptable. | Restore SSH/sudo/Python/disk access; preserve the partial capture first. |
+| <code>collector.evidence_gap</code> | fact | Required journals, Pod logs, or Kubernetes sources denied, failed, unsupported, or truncated. Optional Cilium CRD, CSIStorageCapacity, or Prometheus absence alone is excluded. | Inspect source statuses and correct only the missing permission, timeout, or cap. |
+| <code>collector.boot_changed</code> | fact | Node boot ID changed during collection. | Split the timeline at reboot; pre/post state was not simultaneous. |
+| <code>collector.etcd_evidence_gap</code> | fact | Enabled etcd evidence is unavailable, partial, unsupported, or failed. | Check topology, standard paths, tools, and access; do not infer health from absence. |
+| <code>inventory.mixed_kernel</code> | fact | More than one kernel release across nodes. | Compare modules, Cilium/runtime/KESL compatibility and rollout history; mixture is risk, not automatically failure. |
+| <code>inventory.unsupported_version_skew</code> | fact | kube-apiserver or kubelet minor versions exceed the supported skew. | Plan version alignment using the version-skew policy; do not improvise the upgrade order. |
+
+### 12.2 Node OS and services
+
+| Rule | Type | What is checked | Safe first response |
+|---|---|---|---|
+| <code>node.kubelet_inactive</code> | fact | Collected systemd state is neither active nor activating. | Inspect kubelet status/journal and cgroup, runtime, certificate, mount prerequisites. |
+| <code>node.runtime_inactive</code> | fact | Detected containerd/CRI-O units are all inactive. | Inspect runtime journal, socket, and storage before restart. |
+| <code>node.low_root_disk</code> | fact | Root filesystem has less than 10% free. | Identify growth in images, CRI logs, journal and files; do not blindly delete runtime data. |
+| <code>node.low_inodes</code> | fact | Any collected filesystem is at least 95% out of inodes. | Find high-file-count directories and retention failures. |
+| <code>time.not_synchronized</code> | fact | NTPSynchronized=no or chrony reports unsynchronized. | Restore time source and assess timestamp/certificate reliability. |
+| <code>certificate.expiring</code> | fact | Discovered certificate expired or expires within 30 days. | Verify clock, owner, and approved rotation procedure. |
+| <code>node.conntrack_full</code> | fact | Deterministic conntrack-table-full/drop log signature. | Check current/max entries and traffic cause before tuning. |
+| <code>node.oom_detected</code> | fact | Kernel, CRI, or Pod log contains an OOM-kill signature. | Identify killed process/cgroup and correlate limits and pressure. |
+| <code>runtime.cri_not_ready</code> | fact | CRI reports RuntimeReady=False. | Inspect runtime service/socket, cgroups, and runtime storage. |
+| <code>runtime.cri_network_not_ready</code> | fact | CRI reports NetworkReady=False. | Inspect Cilium, CNI configuration, and sandbox Events on the node. |
+| <code>node.swap_active</code> | fact | Swap is active while kubelet failSwapOn is not disabled. | Compare intended kubelet policy and actual swap usage before changing the node. |
+| <code>node.low_runtime_disk</code> | fact | A separate kubelet/runtime/log filesystem is at least 90% used. | Identify the consumer on that mount; do not blindly remove runtime data. |
+| <code>certificate.kubelet_rotation_broken</code> | fact | Certificate rotation is enabled but kubelet-client-current.pem or its target is invalid. | Inspect the symlink, target certificate, and kubelet journal; do not replace certificates automatically. |
+
+### 12.3 Node Problem Detector-derived kernel signatures
+
+These signatures are adapted from the pinned upstream Node Problem Detector configuration. They recognize messages; they do not perform hardware or filesystem repair.
+
+| Rule | Type | What is checked | Safe first response |
+|---|---|---|---|
+| <code>node.task_hung</code> | fact | Kernel reports a blocked/hung task. | Preserve task stack and storage evidence before reboot. |
+| <code>node.unregister_netdevice</code> | fact | Kernel waits while unregistering a network device. | Correlate Cilium/veth lifecycle, interfaces, Pod deletion, and kernel version. |
+| <code>node.kernel_oops</code> | fact | Kernel oops/panic-class signature. | Preserve the full journal and compare kernel/modules across nodes. |
+| <code>node.filesystem_error</code> | fact | EXT4 error or XFS forced-shutdown/error signature. | Reduce writes, assess device/filesystem health, follow filesystem procedure. |
+| <code>node.filesystem_warning</code> | fact | EXT4 warning signature. | Review surrounding messages and storage health. |
+| <code>node.io_error</code> | fact | Buffer I/O error signature. | Map device/path and correlate multipath/storage/filesystem evidence. |
+| <code>node.hardware_error</code> | fact | Machine-check, memory, corrected/recoverable/fatal hardware signature. | Map to hardware and run approved vendor diagnostics. |
+
+### 12.4 Kubernetes Nodes, Pods, probes, and workloads
+
+| Rule | Type | What is checked | Safe first response |
+|---|---|---|---|
+| <code>kubernetes.node_not_ready</code> | fact | Node Ready is False or Unknown. | Read reason/message, Lease, kubelet/runtime/CNI evidence and Events. |
+| <code>kubernetes.node_pressure</code> | fact | MemoryPressure, DiskPressure, or PIDPressure is True. | Investigate the named resource and eviction signals. |
+| <code>kubernetes.network_unavailable</code> | fact | NetworkUnavailable=True. | Inspect Cilium, routes, devices, IPAM, and node logs. |
+| <code>kubernetes.pod_crash_loop</code> | fact | Container state is CrashLoopBackOff. | Inspect previous/current logs, exit status, probes and dependencies. |
+| <code>kubernetes.image_pull_failure</code> | fact | Container state/Event reports image pull/back-off. | Check image name, registry reachability, credential mechanism, trust, and disk. |
+| <code>kubernetes.pod_oom_killed</code> | fact | Terminated container reason is OOMKilled. | Compare limit, workload demand, and node pressure. |
+| <code>kubernetes.failed_scheduling</code> | fact | Event reports FailedScheduling. | Use its reason: resources, taints, affinity, volumes, and topology differ. |
+| <code>kubernetes.probe_failures</code> | fact | Readiness/liveness/startup probe fails in Event/log; classifies timeout, refused, no route, address family, DNS, TLS, or HTTP where possible. | Test the exact endpoint from the proper network context and verify probe config. |
+| <code>kubernetes.workload_degraded</code> | fact | Deployment/StatefulSet ready below desired; DaemonSet ready below desired scheduled; or Job failed with no success. | Inspect owned Pods and Events using kind-specific desired/ready fields. |
+| <code>kubernetes.pod_waiting</code> | fact | A container has a diagnostic waiting reason not covered by image-pull or crash-loop rules. | Inspect the exact reason, current/previous logs, mounts, config, and runtime Events. |
+| <code>kubernetes.init_container_failed</code> | fact | An init container waits with an error or exits nonzero. | Inspect init-container current/previous logs and the dependency it prepares. |
+| <code>kubernetes.container_exit_nonzero</code> | fact | A container in a Failed Pod exited nonzero without OOMKilled/Completed. | Start from exit reason/code and previous logs. |
+| <code>kubernetes.pod_evicted</code> | fact | Pod phase/reason reports eviction. | Correlate the eviction message with node pressure and QoS. |
+| <code>kubernetes.pod_restart_storm</code> | fact | restartCount is at least five and the last termination is within one hour. | Inspect the latest previous log and first failure in the incident window. |
+| <code>kubernetes.deployment_rollout_failed</code> | fact | Deployment reports ProgressDeadlineExceeded or ReplicaFailure. | Inspect ReplicaSets, unavailable Pods, admission, quota, and scheduling. |
+| <code>kubernetes.daemonset_misscheduled</code> | fact | DaemonSet numberMisscheduled is nonzero. | Compare selectors, taints/tolerations, affinity, and node labels. |
+| <code>kubernetes.statefulset_rollout_stalled</code> | fact | StatefulSet revisions differ while updated replicas remain incomplete. | Inspect the first non-updated ordinal and its storage/readiness constraints. |
+| <code>kubernetes.job_failed</code> | fact | Job condition Failed=True. | Inspect failed Pods, backoffLimit, deadline, and exit codes. |
+| <code>pdb.insufficient_healthy</code> | fact | currentHealthy is below desiredHealthy. | Restore workload health before maintenance; do not relax the PDB automatically. |
+| <code>pdb.disruption_blocked</code> | fact | disruptionsAllowed is zero. | Treat it as maintenance context, not an outage by itself. |
+
+### 12.5 IPv6, CNI, and Cilium
+
+| Rule | Type | What is checked | Safe first response |
+|---|---|---|---|
+| <code>network.ipv6_disabled</code> | fact with correlated context | Effective net.ipv6.conf.*.disable_ipv6=1. Priority rises with same-node IPv6 Pods or address-family errors. | Compare intended Cilium address families and all-node sysctl consistency; reverse via controlled OS process. |
+| <code>network.cni_unavailable</code> | hypothesis | CNI initialization, sandbox networking, plugin, or network-unavailable signatures. | Inspect same-node Cilium/runtime evidence; this may be a consequence. |
+| <code>cilium.unhealthy</code> | fact | Cilium Pod/container missing, non-running, non-ready, waiting, or repeatedly failing. | Separate agent/operator scope; inspect logs, mounts/cgroups, Node and API. |
+| <code>cilium.endpoint_unhealthy</code> | fact | CiliumEndpoint state is not ready or health not OK. | Map endpoint to Pod/node and inspect policy, identity, IP and agent. |
+| <code>cilium.node_ipam_error</code> | fact | CiliumNode IPAM/operator status contains an explicit error. | Check pools, allocations, operator logs, and address conflicts. |
+| <code>cilium.policy_import_failed</code> | fact | Cilium policy node status has ok=false or error. | Identify policy revision/node and validate policy and agent state. |
+| <code>cilium.kube_proxy_replacement_disabled</code> | fact | kube-proxy Pods are absent and Cilium configuration explicitly disables replacement. | Verify effective replacement on every agent and use the approved Cilium rollout procedure. |
+| <code>cilium.service_frontend_missing</code> | hypothesis | A node's read-only Cilium service map misses an expected Service ClusterIP/port. | Repeat the snapshot, then inspect service list, agent status, and watch errors. |
+
+The cluster may intentionally run without kube-proxy. Its absence alone never produces a finding; with Cilium replacement enabled, this is the supported expected state.
+
+### 12.6 cgroup and KESL
+
+| Rule | Type | What is checked | Safe first response |
+|---|---|---|---|
+| <code>cgroup.controllers_missing</code> | hypothesis | On cgroup v2, cpu or io controller absent from collected hierarchy/delegation evidence. | Verify hierarchy, kernel arguments, systemd delegation, and security software. |
+| <code>cgroup.driver_mismatch</code> | fact | Explicit kubelet and runtime cgroup driver values differ. | Align through the approved platform change procedure. |
+| <code>cgroup.service_failure</code> | correlation | cgroup denial/failure and kubelet/runtime failure on same node within 15 minutes. | Order the timeline and inspect kernel/security audit evidence. |
+| <code>security_agent.cgroup_denial</code> | correlation | KESL detected plus cgroup denial/failure in same node scope. | Record exact KESL build, kernel and denied operation; verify vendor policy/compatibility. It is not proof of cause. |
+
+### 12.7 Service, EndpointSlice, and DNS
+
+| Rule | Type | What is checked | Safe first response |
+|---|---|---|---|
+| <code>kubernetes.service_no_endpoints</code> | fact | Selector-based non-ExternalName Service has no EndpointSlice. | Compare selector/Pod labels and inspect controller, admission, readiness. |
+| <code>kubernetes.service_no_ready_endpoints</code> | fact | Slices exist but no endpoint is ready and non-terminating. | Inspect Pod readiness and endpoint conditions, including intentional publish-not-ready use. |
+| <code>kubernetes.service_port_unresolved</code> | hypothesis | Service port/target cannot be matched to EndpointSlice ports, or data is absent/inconsistent. | Compare port, targetPort, named container ports, and slice ports. |
+| <code>dns.kube_dns_unavailable</code> | fact | kube-dns absent/no ready endpoints, or CoreDNS Pods absent/not Running/not fully ready. | Inspect CoreDNS, Service/Slices, Cilium, and upstream resolvers. |
+| <code>dns.cluster_dns_mismatch</code> | fact | Explicit kubelet clusterDNS has no overlap with kube-dns ClusterIP values. | Check all address families/config sources, then use controlled rollout. |
+| <code>dns.nameserver_limit_exceeded</code> | fact | The kubelet resolver contains more than three nameservers. | Check kubelet resolvConf and use a reviewed local caching resolver if required. |
+| <code>dns.coredns_errors</code> | fact | CoreDNS logs contain SERVFAIL, forwarding-loop, or upstream-failure evidence. | Inspect forward targets, loop plugin, upstream reachability, and node resolver state. |
+| <code>dns.coredns_config_empty</code> | fact | The coredns ConfigMap has no non-empty Corefile. | Restore the approved Corefile through change control. |
+
+### 12.8 Control plane and API
+
+| Rule | Type | What is checked | Safe first response |
+|---|---|---|---|
+| <code>controlplane.api_readyz_failed</code> | fact | Retrieved readyz verbose output contains failed named checks or endpoint failure. | Use the failed subcheck to select apiserver/dependency evidence. |
+| <code>controlplane.apiservice_unavailable</code> | fact | Aggregated APIService Available=False or Unknown. | Inspect reason, backing Service/endpoints, TLS and extension server. |
+| <code>controlplane.node_lease_stale</code> | correlation | Node Lease absent or older than newest peer by max(120 s, 3 x leaseDurationSeconds). | Compare kubelet, API reachability, and clock; account for global API freeze. |
+| <code>controlplane.static_pod_unhealthy</code> | fact | Collected etcd/apiserver/scheduler/controller-manager mirror Pod absent or unhealthy. | Map to control-plane node and inspect static manifest, kubelet, container, dependencies. |
+
+### 12.9 etcd
+
+| Rule | Type | What is checked | Safe first response |
+|---|---|---|---|
+| <code>etcd.unhealthy</code> | fact | Endpoint health false, unhealthy, timeout, or error. | Preserve member output; check quorum, network, disk latency, certificates. |
+| <code>etcd.alarm_active</code> | fact | alarm list returns at least one active alarm. | Follow alarm-specific procedure; verify storage/backup before defrag/disarm. |
+| <code>etcd.topology_inconsistent</code> | fact | No leader, multiple leader IDs, or multiple cluster IDs in expected peers. | Confirm timestamps/endpoints, then treat as quorum/topology incident. |
+| <code>etcd.raft_apply_lag</code> | hypothesis | Applied Raft index or endpoint revision differs substantially. | Check disk fsync latency, network RTT, CPU pressure, and member logs. |
+| <code>etcd.database_near_quota</code> | fact | dbSize reaches at least 80% of the configured backend quota. | Investigate keyspace growth and follow the approved compaction/defrag procedure. |
+| <code>etcd.fragmentation_high</code> | hypothesis | A sufficiently large dbSize is more than twice dbSizeInUse. | Evaluate an online defrag window; kdiag does not run defrag. |
+| <code>etcd.member_version_drift</code> | fact | Endpoint status reports different member versions. | Confirm whether this is a supported upgrade stage and complete alignment. |
+
+### 12.10 Storage and CSI
+
+| Rule | Type | What is checked | Safe first response |
+|---|---|---|---|
+| <code>storage.pvc_pending</code> | fact | PVC phase is Pending. | Inspect Events, class, binding mode, capacity/topology, and provisioner. |
+| <code>storage.storage_class_missing</code> | fact | Explicit PVC storageClassName absent from collected StorageClasses. | Confirm spelling/lifecycle and provisioner before creating anything. |
+| <code>storage.pv_failed</code> | fact | PV phase is Failed. | Inspect status, claim relation, CSI/backend; protect data first. |
+| <code>storage.volume_attachment_failed</code> | fact | VolumeAttachment attached=false with attach/detach error. | Inspect driver, node, volume ID, topology, other attachments, controller logs. |
+| <code>storage.csi_driver_registration_gap</code> | hypothesis | Driver used by PV/attachment missing from CSIDriver, or failed attachment driver missing from target CSINode. | Verify CSI controller/node registration; CSIDriver absence is not always invalid. |
+| <code>storage.volume_operation_failure</code> | fact | Event reports FailedMount, FailedAttachVolume, or a related volume operation error. | Follow the Event reason to CSI/controller/node/storage evidence. |
+
+### 12.11 Cross-source correlations
+
+| Rule | Type | What is checked | Safe first response |
+|---|---|---|---|
+| <code>correlation.node_runtime_failure</code> | correlation | Node NotReady and kubelet/runtime failure within 15 minutes. | Order events and identify the first failing component. |
+| <code>correlation.node_cni_failure</code> | correlation | Node/Pod sandbox failure and CNI/network failure within 15 minutes. | Inspect node-local Cilium/runtime state around the first event. |
+| <code>correlation.memory_oom_failure</code> | correlation | MemoryPressure and OOM evidence within 15 minutes. | Distinguish node-global and workload-cgroup exhaustion. |
+| <code>correlation.certificate_api_failure</code> | correlation | TLS/certificate error and API or time error within 15 minutes. | Verify clock and chain/expiry before rotating. |
+| <code>correlation.conntrack_network_failure</code> | correlation | Conntrack exhaustion and network/probe failure within 15 minutes. | Verify occupancy/drops and traffic source before tuning. |
+| <code>correlation.probe_network_failure</code> | correlation | Probe failure and network/DNS error occur in the same scope within 15 minutes. | Reproduce from the correct network context and identify the first event. |
+| <code>correlation.storage_failure</code> | correlation | DiskPressure and filesystem/full/read-only evidence coincide on one node. | Protect data, map the affected mount/device, and order the timeline. |
+
+### 12.12 Prometheus
+
+| Rule | Type | What is checked | Safe first response |
+|---|---|---|---|
+| <code>prometheus.alert_firing</code> | fact | Optional Prometheus API returns firing alerts. | Follow the named alert and preserve its labels/annotations with cluster evidence. |
+| <code>prometheus.config_reload_failed</code> | fact | Runtime information reports reloadConfigSuccess=false. | Inspect Prometheus configuration validation and reload logs. |
+| <code>prometheus.corruption_detected</code> | fact | Runtime information reports a nonzero corruption counter. | Preserve storage/log evidence and follow the Prometheus recovery procedure. |
+
+## 13. Collector troubleshooting
+
+- **SSH fails:** verify the inventory-resolved host, OpenSSH config, host key, user/port, sudo -n, and remote Python. A working Ansible playbook is not sufficient because kdiag uses OpenSSH after inventory resolution.
+- **Kubernetes Forbidden:** run auth can-i with the same kubeconfig/context and add only the missing read permission. Missing Cilium CRDs or CSIStorageCapacity can be valid; an RBAC denial is different from object absence.
+- **readyz missing:** distinguish API/TLS/auth failure from missing non-resource URL permission. Absence is not the same as a failed internal readyz check.
+- **etcd evidence missing:** verify the option, stacked topology, standard paths, etcdctl/crictl, container state, and sudo. Never copy a private key merely to suppress the finding.
+- **truncation:** inspect counters/status first; increase the narrowest cap, reduce look-back or namespace scope only if the incident remains covered.
+- **report regeneration:** use the report command on the collection and verify it afterward. Retain the original if evidentiary integrity matters.
+
+## 14. Incident procedure
+
+1. Record incident start and avoid changing nodes before the first capture where safe.
+2. Run preflight from the management account.
+3. Start a full snapshot; use node-only mode rather than waiting indefinitely for a dead API.
+4. Preserve the directory and exit code.
+5. Run verify and attach report, collection metadata, and manifest to the incident record.
+6. Review evidence gaps before interpreting absent findings.
+7. Triage facts, then correlations, then hypotheses.
+8. Validate cited raw evidence and current live state.
+9. Remediate through existing OS/Kubernetes/vendor procedures, one controlled step at a time.
+10. Take a second snapshot and compare completeness/findings.
+
+A backup is not required to collect. It matters before risky etcd, storage, certificate, or node remediation: confirm a recoverable backup and understood restore procedure.
+
+## 15. Known limitations
+
+- The pack recognizes documented structures and known signatures; it is not a universal root-cause engine.
+- There is no LLM inference or fuzzy semantic interpretation of unseen messages.
+- Remediation is advisory and never automatic.
+- Application logs need explicit namespace allowlist and RBAC.
+- Node logs assume standard journald/CRI layouts.
+- etcd supports standard stacked kubeadm-style local deployment only.
+- Heavy-hitter counting may omit low-frequency unknown messages.
+- A 15-minute window can miss slow incidents or correlate coincidences.
+- Automated/synthetic tests do not replace a canary on the exact RED OS 7.x, kernel, runtime, Cilium, KESL, and Kubernetes builds.
+- Baseline and continuous watch modes are not in this release.
+
+## 16. Rule provenance and maintenance
+
+Internet is not required at runtime. Rule metadata retains source links for engineering traceability. Kernel signatures are adapted from a pinned upstream Node Problem Detector configuration; attribution is in <code>THIRD_PARTY_NOTICES.md</code>.
+
+For an update: pin upstream versions/licenses, define deterministic required evidence, add positive/negative/missing-source/truncation/correlation tests, classify fact/correlation/hypothesis, run all tests and self-test, record a new checksum, and transfer the exact artifact through the approved offline process.

@@ -1,0 +1,6 @@
+{"__REALTIME_TIMESTAMP":"1767225600000000","_SYSTEMD_UNIT":"kubelet.service","MESSAGE":"failed to write /sys/fs/cgroup/kubepods.slice/cgroup.subtree_control: permission denied"}
+{"__REALTIME_TIMESTAMP":"1767225660000000","SYSLOG_IDENTIFIER":"kernel","MESSAGE":"nf_conntrack: nf_conntrack: table full, dropping packet"}
+{"__REALTIME_TIMESTAMP":"1767225720000000","SYSLOG_IDENTIFIER":"kernel","MESSAGE":"Memory cgroup out of memory: Killed process 4242 (java)"}
+{"__REALTIME_TIMESTAMP":"1767225780000000","_SYSTEMD_UNIT":"kubelet.service","MESSAGE":"Container runtime network not ready: NetworkReady=false reason:NetworkPluginNotReady message:CNI plugin not initialized"}
+{"__REALTIME_TIMESTAMP":"1767225840000000","_SYSTEMD_UNIT":"kubelet.service","MESSAGE":"ordinary informational line with request 12345"}
+not-json

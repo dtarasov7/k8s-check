@@ -1,0 +1,58 @@
+@startuml
+title kdiag Component Architecture
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+
+package "Command and orchestration" {
+  component "CLI\nkdiag.cli" as CLI
+  component "Configuration\nkdiag.config" as Configuration
+  component "Orchestrator\nkdiag.orchestrator" as Orchestrator
+  component "Inventory parser\nkdiag.inventory" as Inventory
+}
+
+package "Evidence collection" {
+  component "SSH transport\nkdiag.transport" as Transport
+  component "Node collector\nkdiag.node" as NodeCollector
+  component "Kubernetes collector\nkdiag.kubernetes" as KubernetesCollector
+  component "Bounded process runner\nkdiag.runner" as Runner
+}
+
+package "Offline analysis" {
+  component "Normalizer and correlator\nkdiag.normalize" as Normalizer
+  component "Rule evaluator\nkdiag.rules" as Rules
+  component "Rule catalog\nkdiag.rule_catalog" as Catalog
+  component "Pinned NPD signatures\nkdiag.npd_rules" as NPD
+  component "Report builder\nkdiag.report" as Report
+}
+
+package "Persistence and integrity" {
+  component "Atomic JSON/gzip utilities\nkdiag.util" as Utilities
+  component "Manifest writer/verifier\nkdiag.bundle" as Manifest
+  database "Collection files" as Files
+}
+
+CLI --> Configuration
+CLI --> Orchestrator
+CLI --> Report : report command
+CLI --> Manifest : verify command
+Orchestrator --> Inventory
+Orchestrator --> Transport
+Orchestrator --> KubernetesCollector
+Transport --> NodeCollector : copies and runs pyz
+Transport --> Runner
+NodeCollector --> Runner
+KubernetesCollector --> Runner
+Orchestrator --> Report
+Report --> Normalizer
+Report --> Rules
+Rules --> Catalog
+Normalizer --> NPD : NPD categories
+Orchestrator --> Utilities
+Report --> Utilities
+Manifest --> Utilities
+Orchestrator --> Manifest
+Orchestrator --> Files
+Report --> Files
+Manifest --> Files
+@enduml

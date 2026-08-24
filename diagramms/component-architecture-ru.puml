@@ -1,0 +1,58 @@
+@startuml
+title Компонентная архитектура kdiag
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+
+package "Команды и оркестрация" {
+  component "CLI\nkdiag.cli" as CLI
+  component "Конфигурация\nkdiag.config" as Configuration
+  component "Оркестратор\nkdiag.orchestrator" as Orchestrator
+  component "Разбор inventory\nkdiag.inventory" as Inventory
+}
+
+package "Сбор evidence" {
+  component "SSH-транспорт\nkdiag.transport" as Transport
+  component "Сборщик узла\nkdiag.node" as NodeCollector
+  component "Сборщик Kubernetes\nkdiag.kubernetes" as KubernetesCollector
+  component "Ограниченный запуск процессов\nkdiag.runner" as Runner
+}
+
+package "Автономный анализ" {
+  component "Нормализатор и коррелятор\nkdiag.normalize" as Normalizer
+  component "Вычислитель правил\nkdiag.rules" as Rules
+  component "Каталог правил\nkdiag.rule_catalog" as Catalog
+  component "Зафиксированные сигнатуры NPD\nkdiag.npd_rules" as NPD
+  component "Построитель отчёта\nkdiag.report" as Report
+}
+
+package "Хранение и целостность" {
+  component "Атомарная запись JSON/gzip\nkdiag.util" as Utilities
+  component "Создание и проверка manifest\nkdiag.bundle" as Manifest
+  database "Файлы snapshot" as Files
+}
+
+CLI --> Configuration
+CLI --> Orchestrator
+CLI --> Report : команда report
+CLI --> Manifest : команда verify
+Orchestrator --> Inventory
+Orchestrator --> Transport
+Orchestrator --> KubernetesCollector
+Transport --> NodeCollector : копирует и запускает pyz
+Transport --> Runner
+NodeCollector --> Runner
+KubernetesCollector --> Runner
+Orchestrator --> Report
+Report --> Normalizer
+Report --> Rules
+Rules --> Catalog
+Normalizer --> NPD : категории NPD
+Orchestrator --> Utilities
+Report --> Utilities
+Manifest --> Utilities
+Orchestrator --> Manifest
+Orchestrator --> Files
+Report --> Files
+Manifest --> Files
+@enduml

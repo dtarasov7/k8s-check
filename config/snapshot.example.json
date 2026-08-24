@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "collection": {
+    "since_hours": 24,
+    "parallelism": 2,
+    "command_timeout_seconds": 30,
+    "max_command_bytes": 1048576,
+    "max_node_bundle_bytes": 33554432,
+    "central_reserve_bytes": 1073741824,
+    "pod_log_tail_bytes": 65536,
+    "pod_log_total_bytes": 8388608,
+    "pod_log_max_files": 200,
+    "collect_etcd": true
+  },
+  "ssh": {
+    "connect_timeout_seconds": 10,
+    "remote_python": "/usr/bin/python3.8",
+    "user": null,
+    "port": 22
+  },
+  "kubernetes": {
+    "enabled": true,
+    "kubeconfig": null,
+    "context": null,
+    "command_timeout_seconds": 30,
+    "max_wire_bytes": 67108864,
+    "max_bundle_bytes": 134217728,
+    "system_namespaces": [
+      "kube-system"
+    ],
+    "application_namespaces": [],
+    "collect_system_logs": true,
+    "log_tail_lines": 200,
+    "max_log_pods": 100,
+    "max_log_bytes": 33554432
+  },
+  "prometheus": {
+    "url": null,
+    "timeout_seconds": 3,
+    "max_response_bytes": 1048576
+  }
+}

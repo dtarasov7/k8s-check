@@ -1,0 +1,42 @@
+@startuml
+title Контекст системы kdiag
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultTextAlignment center
+
+actor "Администратор кластера" as Operator
+
+node "Управляющий сервер" as Management {
+  component "kdiag.pyz" as Kdiag
+  database "Каталог snapshot\n(gzip, JSON, Markdown)" as Output
+}
+
+file "Ansible inventory" as Inventory
+file "JSON-конфигурация" as Config
+file "Read-only kubeconfig" as Kubeconfig
+
+cloud "Кластер Kubernetes" as Cluster {
+  node "Узлы кластера" as Nodes
+  component "Kubernetes API" as API
+  component "Stacked etcd\n(необязательно)" as Etcd
+}
+
+component "Prometheus\n(необязательно)" as Prometheus
+
+Operator --> Kdiag : Запускает snapshot, report, verify
+Inventory --> Kdiag : Имена узлов и параметры SSH
+Config --> Kdiag : Лимиты и политика сбора
+Kubeconfig --> Kdiag : Отдельная identity
+Kdiag --> Nodes : SCP + SSH + sudo -n\nread-only диагностика
+Kdiag --> API : Read-only запросы kubectl
+Nodes --> Etcd : Локальные read-only health checks
+Kdiag --> Prometheus : Ограниченный HTTP-запрос
+Kdiag --> Output : Записывает отдельный snapshot
+Operator <-- Output : Изучает отчёт и evidence
+
+note bottom of Kdiag
+Без LLM, постоянного агента,
+базы данных и remediation
+end note
+@enduml

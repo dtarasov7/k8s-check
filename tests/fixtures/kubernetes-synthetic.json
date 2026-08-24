@@ -1,0 +1,139 @@
+{
+  "collected_at": "2026-01-01T00:10:00Z",
+  "sources": {
+    "nodes": {
+      "status": "collected",
+      "data": {
+        "items": [
+          {
+            "metadata": {"name": "node-1"},
+            "status": {
+              "conditions": [
+                {
+                  "type": "Ready",
+                  "status": "False",
+                  "reason": "KubeletNotReady",
+                  "message": "container runtime network not ready",
+                  "lastTransitionTime": "2026-01-01T00:02:00Z"
+                },
+                {
+                  "type": "MemoryPressure",
+                  "status": "True",
+                  "reason": "KubeletHasInsufficientMemory",
+                  "message": "node is under memory pressure",
+                  "lastTransitionTime": "2026-01-01T00:03:00Z"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "pods": {
+      "status": "collected",
+      "data": {
+        "items": [
+          {
+            "metadata": {"namespace": "demo", "name": "app-1", "labels": {"app": "demo"}},
+            "spec": {"nodeName": "node-1", "containers": [{"name": "app"}]},
+            "status": {
+              "phase": "Running",
+              "startTime": "2026-01-01T00:00:00Z",
+              "containerStatuses": [
+                {
+                  "name": "app",
+                  "ready": false,
+                  "restartCount": 4,
+                  "state": {"waiting": {"reason": "CrashLoopBackOff", "message": "back-off restarting failed container"}},
+                  "lastState": {"terminated": {"reason": "OOMKilled", "exitCode": 137, "message": ""}}
+                }
+              ]
+            }
+          },
+          {
+            "metadata": {"namespace": "demo", "name": "app-2", "labels": {"app": "demo"}},
+            "spec": {"nodeName": "node-1", "containers": [{"name": "app"}]},
+            "status": {
+              "phase": "Pending",
+              "startTime": "2026-01-01T00:01:00Z",
+              "containerStatuses": [
+                {
+                  "name": "app",
+                  "ready": false,
+                  "restartCount": 0,
+                  "state": {"waiting": {"reason": "ImagePullBackOff", "message": "failed to pull image example.invalid/app:v1"}},
+                  "lastState": {}
+                }
+              ]
+            }
+          },
+          {
+            "metadata": {"namespace": "kube-system", "name": "cilium-node-1", "labels": {"k8s-app": "cilium"}},
+            "spec": {"nodeName": "node-1", "containers": [{"name": "cilium-agent"}]},
+            "status": {
+              "phase": "Pending",
+              "startTime": "2026-01-01T00:01:00Z",
+              "containerStatuses": [
+                {
+                  "name": "cilium-agent",
+                  "ready": false,
+                  "restartCount": 3,
+                  "state": {"waiting": {"reason": "CrashLoopBackOff", "message": "back-off restarting failed container"}},
+                  "lastState": {}
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "events": {
+      "status": "collected",
+      "data": {
+        "items": [
+          {
+            "metadata": {"namespace": "demo", "name": "sandbox-error"},
+            "type": "Warning",
+            "reason": "FailedCreatePodSandbox",
+            "note": "Failed to create pod sandbox: CNI plugin not initialized",
+            "regarding": {"kind": "Pod", "namespace": "demo", "name": "app-1"},
+            "reportingController": "kubelet",
+            "eventTime": "2026-01-01T00:04:00Z"
+          },
+          {
+            "metadata": {"namespace": "demo", "name": "probe-error"},
+            "type": "Warning",
+            "reason": "Unhealthy",
+            "note": "Readiness probe failed: dial tcp 10.0.0.2:8080: i/o timeout",
+            "regarding": {"kind": "Pod", "namespace": "demo", "name": "app-1"},
+            "reportingController": "kubelet",
+            "eventTime": "2026-01-01T00:05:00Z"
+          },
+          {
+            "metadata": {"namespace": "demo", "name": "schedule-error"},
+            "type": "Warning",
+            "reason": "FailedScheduling",
+            "note": "0/3 nodes are available: 3 Insufficient cpu",
+            "regarding": {"kind": "Pod", "namespace": "demo", "name": "app-2"},
+            "reportingController": "default-scheduler",
+            "eventTime": "2026-01-01T00:06:00Z"
+          }
+        ]
+      }
+    },
+    "workloads": {
+      "status": "collected",
+      "data": {
+        "items": [
+          {
+            "kind": "Deployment",
+            "metadata": {"namespace": "demo", "name": "app", "labels": {"app": "demo"}},
+            "spec": {"replicas": 2},
+            "status": {"replicas": 2, "readyReplicas": 1, "availableReplicas": 1}
+          }
+        ]
+      }
+    }
+  },
+  "logs": {"status": "collected", "entries": []}
+}

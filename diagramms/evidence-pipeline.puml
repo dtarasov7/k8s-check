@@ -1,0 +1,44 @@
+@startuml
+title Evidence Processing Pipeline
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+
+rectangle "Bounded source collection" as Collection {
+  component "Node snapshots" as Nodes
+  component "Kubernetes snapshot" as Kubernetes
+  component "Prometheus snapshot" as Prometheus
+}
+
+database "Raw gzip/JSON evidence" as Raw
+component "Event normalization\nclassification and fingerprinting" as Normalize
+component "Scoped 15-minute\ncorrelation" as Correlate
+component "Versioned deterministic\nrule evaluation" as Rules
+component "Coverage and node\ninventory extraction" as Facts
+component "Report assembly" as Report
+database "Derived artifacts" as Derived
+component "SHA-256 manifest" as Manifest
+
+Nodes --> Raw
+Kubernetes --> Raw
+Prometheus --> Raw
+Raw --> Normalize
+Normalize --> Correlate
+Correlate --> Rules
+Raw --> Rules : Structured state
+Raw --> Facts
+Rules --> Report : Facts, correlations, hypotheses
+Facts --> Report
+Normalize --> Derived : normalized-events.json.gz
+Facts --> Derived : facts.json
+Rules --> Derived : findings.json
+Report --> Derived : report.json and report.md
+Raw --> Manifest
+Derived --> Manifest
+Manifest --> Derived : manifest.json
+
+note right of Rules
+Missing evidence remains a coverage gap;
+it is not converted into a match.
+end note
+@enduml

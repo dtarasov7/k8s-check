@@ -1,0 +1,68 @@
+{
+  "collected_at": "2026-01-01T00:10:00Z",
+  "sources": {
+    "nodes": {
+      "status": "collected",
+      "data": {
+        "items": [
+          {"metadata": {"name": "node-1"}, "status": {"conditions": [{"type": "Ready", "status": "False"}]}},
+          {"metadata": {"name": "node-2"}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+        ]
+      }
+    },
+    "pods": {
+      "status": "collected",
+      "data": {
+        "items": [
+          {
+            "metadata": {"namespace": "kube-system", "name": "coredns-bad", "labels": {"k8s-app": "kube-dns"}},
+            "spec": {"nodeName": "node-1", "containers": [{"name": "coredns"}]},
+            "status": {"phase": "Pending", "containerStatuses": [{"name": "coredns", "ready": false, "state": {"waiting": {"reason": "CrashLoopBackOff"}}}]}
+          },
+          {
+            "metadata": {"namespace": "kube-system", "name": "kube-apiserver-node-1", "labels": {"component": "kube-apiserver"}},
+            "spec": {"nodeName": "node-1", "containers": [{"name": "kube-apiserver"}]},
+            "status": {"phase": "Running", "containerStatuses": [{"name": "kube-apiserver", "ready": false, "state": {"running": {}}}]}
+          }
+        ]
+      }
+    },
+    "events": {"status": "collected", "data": {"items": []}},
+    "workloads": {"status": "collected", "data": {"items": []}},
+    "services": {
+      "status": "collected",
+      "data": {
+        "items": [
+          {"metadata": {"namespace": "demo", "name": "missing", "labels": {}}, "spec": {"type": "ClusterIP", "selector": {"app": "missing"}, "ports": [{"port": 80, "targetPort": 8080}]}},
+          {"metadata": {"namespace": "demo", "name": "unready", "labels": {}}, "spec": {"type": "ClusterIP", "selector": {"app": "unready"}, "ports": [{"name": "http", "port": 80, "targetPort": 8080}]}},
+          {"metadata": {"namespace": "demo", "name": "bad-port", "labels": {}}, "spec": {"type": "ClusterIP", "selector": {"app": "port"}, "ports": [{"name": "http", "port": 80, "targetPort": 8080}]}},
+          {"metadata": {"namespace": "kube-system", "name": "kube-dns", "labels": {"k8s-app": "kube-dns"}}, "spec": {"type": "ClusterIP", "clusterIP": "10.96.0.10", "clusterIPs": ["10.96.0.10"], "selector": {"k8s-app": "kube-dns"}, "ports": [{"name": "dns", "port": 53, "targetPort": 53}]}}
+        ]
+      }
+    },
+    "endpoint_slices": {
+      "status": "collected",
+      "data": {
+        "items": [
+          {"metadata": {"namespace": "demo", "name": "unready-a", "labels": {"kubernetes.io/service-name": "unready"}}, "ports": [{"name": "http", "port": 8080}], "endpoints": [{"addresses": ["10.0.0.2"], "conditions": {"ready": false}}]},
+          {"metadata": {"namespace": "demo", "name": "bad-port-a", "labels": {"kubernetes.io/service-name": "bad-port"}}, "ports": [{"name": "http", "port": 9090}], "endpoints": [{"addresses": ["10.0.0.3"], "conditions": {"ready": true}}]},
+          {"metadata": {"namespace": "kube-system", "name": "kube-dns-a", "labels": {"kubernetes.io/service-name": "kube-dns"}}, "ports": [{"name": "dns", "port": 53}], "endpoints": [{"addresses": ["10.0.0.10"], "conditions": {"ready": false}}]}
+        ]
+      }
+    },
+    "api_readyz": {"status": "collected", "data": {"checks": [{"name": "etcd", "status": "failed", "message": "reason withheld"}]}},
+    "api_services": {"status": "collected", "data": {"items": [{"metadata": {"name": "v1beta1.metrics.k8s.io"}, "status": {"conditions": [{"type": "Available", "status": "False", "reason": "MissingEndpoints"}]}}]}},
+    "leases": {"status": "collected", "data": {"items": [{"metadata": {"namespace": "kube-node-lease", "name": "node-1"}, "spec": {"renewTime": "2026-01-01T00:00:00Z", "leaseDurationSeconds": 40}}, {"metadata": {"namespace": "kube-node-lease", "name": "node-2"}, "spec": {"renewTime": "2026-01-01T00:09:59Z", "leaseDurationSeconds": 40}}]}},
+    "pvc": {"status": "collected", "data": {"items": [{"metadata": {"namespace": "demo", "name": "data"}, "spec": {"storageClassName": "missing-class"}, "status": {"phase": "Pending"}}]}},
+    "pv": {"status": "collected", "data": {"items": [{"metadata": {"name": "pv-bad"}, "spec": {"csi": {"driver": "missing.csi.example"}}, "status": {"phase": "Failed"}}]}},
+    "storage_classes": {"status": "collected", "data": {"items": [{"metadata": {"name": "default"}, "provisioner": "other.csi.example"}]}},
+    "volume_attachments": {"status": "collected", "data": {"items": [{"metadata": {"name": "attach-bad"}, "spec": {"attacher": "missing.csi.example", "nodeName": "node-1", "source": {"persistentVolumeName": "pv-bad"}}, "status": {"attached": false, "attachError": {"message": "driver not registered"}}}]}},
+    "csi_drivers": {"status": "collected", "data": {"items": [{"metadata": {"name": "other.csi.example"}}]}},
+    "csi_nodes": {"status": "collected", "data": {"items": [{"metadata": {"name": "node-1"}, "spec": {"drivers": [{"name": "other.csi.example"}]}}]}},
+    "cilium_nodes": {"status": "collected", "required": false, "data": {"items": [{"metadata": {"name": "node-1"}, "status": {"ipam": {"operatorStatus": {"error": "pool exhausted"}}}}]}},
+    "cilium_endpoints": {"status": "collected", "required": false, "data": {"items": [{"metadata": {"namespace": "demo", "name": "app"}, "status": {"state": "regenerating", "health": {"overallHealth": "warning"}}}]}},
+    "cilium_network_policies": {"status": "collected", "required": false, "data": {"items": [{"metadata": {"namespace": "demo", "name": "deny"}, "status": {"nodes": [{"node": "node-1", "ok": false, "error": "import failed"}]}}]}},
+    "cilium_clusterwide_network_policies": {"status": "collected", "required": false, "data": {"items": []}}
+  },
+  "logs": {"status": "collected", "entries": []}
+}

@@ -1,0 +1,55 @@
+@startuml
+title Emergency Snapshot Execution
+
+skinparam shadowing false
+
+actor Operator
+participant "CLI" as CLI
+participant "Orchestrator" as Orchestrator
+participant "ansible-inventory" as Inventory
+participant "SSH transport" as SSH
+participant "Node collector" as Node
+participant "Kubernetes collector" as Kubernetes
+participant "Kubernetes API" as API
+participant "Prometheus" as Prometheus
+participant "Report builder" as Report
+participant "Manifest writer" as Manifest
+database "Collection directory" as Output
+
+Operator -> CLI : snapshot options
+CLI -> CLI : Load and validate configuration
+CLI -> Orchestrator : run_snapshot(...)
+Orchestrator -> Inventory : --list --export
+Inventory --> Orchestrator : Validated host list
+Orchestrator -> Orchestrator : Check central disk reserve\nBuild temporary kdiag.pyz
+
+par Each node, bounded by parallelism
+  Orchestrator -> SSH : collect_node(...)
+  SSH -> Node : SCP kdiag.pyz
+  SSH -> Node : sudo -n python3.8\nnode-snapshot
+  Node -> Node : Run bounded read-only checks
+  Node --> SSH : gzip JSON on stdout
+  SSH -> Output : node-<host>.json.gz
+  SSH -> Node : Remove temporary kdiag.pyz
+end
+
+Orchestrator -> Kubernetes : collect(...)
+par Three bounded read-only query groups
+  Kubernetes -> API : kubectl get / get --raw
+  API --> Kubernetes : Projected resources and readiness
+end
+Kubernetes -> API : Approved bounded Pod logs
+API --> Kubernetes : Current and previous logs
+Kubernetes -> Output : kubernetes.json.gz
+
+Orchestrator -> Prometheus : Optional bounded HTTP request
+Prometheus --> Orchestrator : Evidence or unavailable status
+Orchestrator -> Output : prometheus.json.gz\ncollection.json
+
+Orchestrator -> Report : build_report(...)
+Report -> Output : normalized events, facts,\nfindings, JSON and Markdown reports
+Orchestrator -> Manifest : write_manifest(...)
+Manifest -> Output : manifest.json
+Orchestrator --> CLI : Collection path and complete/partial status
+CLI --> Operator : Path and exit code 0/1
+@enduml

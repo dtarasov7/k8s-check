@@ -1,0 +1,9 @@
+{"__REALTIME_TIMESTAMP":"1767225601000000","_TRANSPORT":"kernel","MESSAGE":"task jbd2/sda1-8:123 blocked for more than 120 seconds."}
+{"__REALTIME_TIMESTAMP":"1767225602000000","_TRANSPORT":"kernel","MESSAGE":"unregister_netdevice: waiting for cilium_vxlan to become free. Usage count = 1"}
+{"__REALTIME_TIMESTAMP":"1767225603000000","_TRANSPORT":"kernel","MESSAGE":"BUG: unable to handle kernel NULL pointer dereference at 0000000000000010"}
+{"__REALTIME_TIMESTAMP":"1767225604000000","_TRANSPORT":"kernel","MESSAGE":"EXT4-fs error (device sda1): ext4_find_entry: bad entry"}
+{"__REALTIME_TIMESTAMP":"1767225605000000","_TRANSPORT":"kernel","MESSAGE":"EXT4-fs warning (device sda1): mounting fs with errors"}
+{"__REALTIME_TIMESTAMP":"1767225606000000","_TRANSPORT":"kernel","MESSAGE":"Buffer I/O error on dev sda, logical block 42"}
+{"__REALTIME_TIMESTAMP":"1767225607000000","_TRANSPORT":"kernel","MESSAGE":"XFS (dm-0): Shutting down filesystem"}
+{"__REALTIME_TIMESTAMP":"1767225608000000","_TRANSPORT":"kernel","MESSAGE":"EDAC MC0: CE memory read error page:0x1"}
+{"__REALTIME_TIMESTAMP":"1767225609000000","_TRANSPORT":"kernel","MESSAGE":"mce: [Hardware Error]: event severity: fatal"}
