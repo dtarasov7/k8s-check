@@ -1,6 +1,6 @@
 # kdiag: One-Time Kubernetes / RED OS Emergency Snapshot
 
-`kdiag` collects a bounded diagnostic snapshot from cluster nodes and the Kubernetes API, normalizes and correlates events, and produces local gzip/JSON bundles, deterministic findings, and a Markdown report. This implementation does not use an LLM, automatic remediation, or persistent agents.
+`kdiag` collects a bounded diagnostic snapshot from cluster nodes and the Kubernetes API, normalizes and correlates events, and produces local gzip/JSON bundles, deterministic findings, and a Markdown report. An optional offline command can prepare minimized input for an LLM, but LLM inference is not required for collection or deterministic analysis. Automatic remediation and persistent agents are not used.
 
 ## Implemented Features
 
@@ -9,6 +9,7 @@
 - node collector execution over `ssh` and `sudo -n`;
 - best-effort collection when a node, the API, or Prometheus is unavailable;
 - node evidence covering the OS, kernel, boot, packages, systemd, kubelet, CRI inventory/readiness, journals, network, sysctl, cgroups, PSI/resources, configuration hashes, certificate rotation metadata, read-only stacked-etcd status/capacity, and bounded CRI logs;
+- active-runtime detection for vanilla `containerd.service`, `crio.service`, and Deckhouse `containerd-deckhouse.service`; missing and unused alternative units are not treated as failures;
 - allowlist projections of Nodes, Pods, Events, workloads, Services, EndpointSlices, APIService, Lease, PDB/PV/PVC/CSI, NetworkPolicy, and diagnostic Cilium CRDs;
 - API server `/readyz?verbose` and bounded parallel Kubernetes collection with three read-only requests;
 - bounded current and previous logs from system namespaces and explicitly approved application namespaces only;
@@ -16,6 +17,7 @@
 - an autonomous rule pack for Node Problem Detector signatures, Pod lifecycle/rollouts/PDB, Service/CoreDNS/EndpointSlice, Prometheus, control-plane/etcd capacity, storage/CSI, runtime/Cilium, version skew, resources, time, and certificates;
 - kube-proxy-free Cilium diagnostics based on the effective replacement setting and read-only per-node Cilium service maps; absence of kube-proxy alone is not an error;
 - findings classified as `fact`, `correlation`, or `hypothesis`, normalized events, and fingerprints for unknown messages.
+- optional minimized local LLM packages and fail-closed pseudonymized packages for a manually operated external LLM.
 
 For detailed operating instructions, see the [English User Guide](docs/UserGuide.md) or the [Russian User Guide](docs/UserGuide-ru.md).
 
@@ -37,6 +39,8 @@ On the management server:
 - a writable `--output-dir`; create it in advance with mode `0700` on the management server's local filesystem.
 
 An example identity and permissions are provided in the [RBAC manifest](deploy/kubernetes/kdiag-rbac.yaml). It is not applied automatically. Access to `pods/log` is granted only in `kube-system`; create a separate namespace-scoped Role and RoleBinding based on this example for every approved application namespace.
+
+Step-by-step creation of a dedicated kubeconfig for the `kdiag-system/kdiag-reader` ServiceAccount, including short-lived token issuance and renewal, is documented under [Kubernetes identity and RBAC](docs/UserGuide.md#6-kubernetes-identity-and-rbac) in the User Guide.
 
 After issuing the kubeconfig, verify the permissions of that exact identity:
 
@@ -77,7 +81,7 @@ Copy the [configuration example](config/snapshot.example.json) and set a dedicat
 
 The safe default for application namespaces is an empty list. Approve namespaces in JSON or with the repeatable `--application-namespace` option.
 
-Stacked-etcd collection is enabled with `collection.collect_etcd=true` and can be disabled in JSON. Optional Cilium CRDs and `CSIStorageCapacity` do not make the snapshot `partial` when a particular API version is absent, but the coverage matrix still records them.
+Stacked-etcd collection is enabled with `collection.collect_etcd=true` and can be disabled in JSON. Direct cgroup collection and related checks can be disabled with `collection.collect_cgroup=false` or `--skip-cgroup`. Optional Cilium CRDs and `CSIStorageCapacity` do not make the snapshot `partial` when a particular API version is absent, but the coverage matrix still records them.
 
 ## Running a Snapshot
 
@@ -96,6 +100,8 @@ Useful options:
 - `--remote-python /path/python3.8` — Python interpreter on the nodes;
 - `--since-hours 24` — journal look-back window;
 - `--parallelism 2` — number of nodes collected concurrently;
+- `--progress off|summary|detail` — disable progress, show phases/nodes, or also show individual source statuses; defaults to `summary` and writes to `stderr`;
+- `--skip-cgroup` — skip direct cgroup facts and suppress cgroup events/findings;
 - `--skip-kubernetes` — collect node evidence only;
 - `--prometheus-url URL` — optional best-effort Prometheus evidence;
 - `--application-namespace NAME` — explicitly approve logs from a namespace.
@@ -155,6 +161,41 @@ Snapshot exit codes:
 - `2` — configuration or preflight failed and collection did not run.
 
 Prometheus is optional and does not affect the exit code.
+
+## Optional LLM Incident Package
+
+`prepare` creates data but does not install or call a model. A local package keeps operational identifiers but excludes raw bundles and full logs:
+
+```bash
+python3.8 dist/kdiag.pyz llm prepare /var/lib/kdiag/<collection-id> \
+  --output-dir /secure/kdiag-llm-local \
+  --profile local \
+  --mode deep-analysis \
+  --question "What are the most likely causes?"
+```
+
+Analyze that prepared package with a separately deployed OpenAI-compatible service bound to literal loopback:
+
+```bash
+python3.8 dist/kdiag.pyz llm analyze-local /secure/kdiag-llm-local/prepared \
+  --model local-model-name \
+  --output-dir /secure/kdiag-llm-local-response
+```
+
+`analyze-local` sends the prepared JSON content, not the collection path, and never executes model suggestions. `kdiag.pyz` does not bundle or configure a model/runtime.
+
+A hardened llama.cpp systemd deployment example is available in [deploy/systemd](deploy/systemd/README.md). New local preparations use `prepared/`; `analyze-local` also accepts legacy local `export/` directories created by kdiag 0.5.0.
+
+For a manual external workflow, use `--profile external`. The command pseudonymizes known node, Kubernetes resource, account, address, DNS, path, UID, and endpoint-port values; retains diagnostic component names and versions; runs outbound DLP; and creates separate `export/` and `private/` directories. Review the exported files, validate them again, and transfer only the contents of `export/`:
+
+```bash
+python3.8 dist/kdiag.pyz llm validate-export /secure/kdiag-llm-external/export
+python3.8 dist/kdiag.pyz llm import-response /secure/google-response.txt \
+  --token-map /secure/kdiag-llm-external/private/token-map.json \
+  --output-dir /secure/kdiag-llm-response
+```
+
+`private/token-map.json` contains the re-identification map and must never leave the trusted environment. The external response is untrusted; `kdiag` stores both the unchanged response and a restored copy. Browser automation and direct Google API access are intentionally absent.
 
 ## Limits and Retention
 

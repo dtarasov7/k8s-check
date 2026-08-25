@@ -94,6 +94,34 @@ class NormalizeTest(unittest.TestCase):
         self.assertEqual(100, normalized["stats"]["unknown_retained_fingerprints"])
         self.assertEqual(10, normalized["stats"]["unknown_fingerprint_replacements"])
 
+    def test_disabled_cgroup_checks_suppress_cgroup_events_and_correlations(self):
+        journal = (FIXTURES / "journal-synthetic.jsonl").read_text(encoding="utf-8")
+        nodes = {
+            "node-1": {
+                "ended_at": "2026-01-01T00:10:00Z",
+                "commands": [{"id": "journal_services_current", "stdout": journal}],
+                "pod_logs": {"entries": []},
+                "facts": {
+                    "service_states": {
+                        "kubelet.service": {
+                            "status": "collected",
+                            "properties": {"ActiveState": "failed"},
+                        }
+                    }
+                },
+            }
+        }
+        normalized = normalize_evidence(
+            {"collection_id": "no-cgroup", "options": {"collect_cgroup": False}},
+            nodes,
+            {},
+        )
+        categories = {category for event in normalized["events"] for category in event["categories"]}
+        correlation_ids = {item["correlation_id"] for item in normalized["correlations"]}
+        self.assertNotIn("cgroup_access_denied", categories)
+        self.assertNotIn("cgroup_service_failure", correlation_ids)
+        self.assertGreater(normalized["stats"]["cgroup_events_suppressed"], 0)
+
     def test_one_record_cannot_correlate_with_itself(self):
         event = {
             "event_id": "one",
@@ -106,6 +134,95 @@ class NormalizeTest(unittest.TestCase):
             "evidence": "synthetic#one",
         }
         self.assertEqual([], correlate_events([event]))
+
+    def test_runtime_state_ignores_missing_and_inactive_alternative_units(self):
+        nodes = {
+            "node-1": {
+                "ended_at": "2026-01-01T00:10:00Z",
+                "commands": [],
+                "pod_logs": {"entries": []},
+                "facts": {
+                    "service_states": {
+                        "containerd.service": {
+                            "status": "collected",
+                            "properties": {"LoadState": "loaded", "ActiveState": "inactive"},
+                        },
+                        "containerd-deckhouse.service": {
+                            "status": "collected",
+                            "properties": {"LoadState": "loaded", "ActiveState": "active"},
+                        },
+                        "crio.service": {
+                            "status": "collected",
+                            "properties": {"LoadState": "not-found", "ActiveState": "inactive"},
+                        },
+                    }
+                },
+            }
+        }
+        normalized = normalize_evidence({"collection_id": "deckhouse"}, nodes, {})
+        categories = {category for event in normalized["events"] for category in event["categories"]}
+        self.assertNotIn("runtime_unavailable", categories)
+
+    def test_failed_loaded_deckhouse_runtime_is_reported_as_state_not_timed_event(self):
+        nodes = {
+            "node-1": {
+                "ended_at": "2026-01-01T00:10:00Z",
+                "commands": [],
+                "pod_logs": {"entries": []},
+                "facts": {
+                    "service_states": {
+                        "containerd.service": {
+                            "status": "collected",
+                            "properties": {"LoadState": "not-found", "ActiveState": "inactive"},
+                        },
+                        "containerd-deckhouse.service": {
+                            "status": "collected",
+                            "properties": {"LoadState": "loaded", "ActiveState": "failed"},
+                        },
+                        "crio.service": {
+                            "status": "collected",
+                            "properties": {"LoadState": "not-found", "ActiveState": "inactive"},
+                        },
+                    }
+                },
+            }
+        }
+        normalized = normalize_evidence({"collection_id": "deckhouse-failed"}, nodes, {})
+        runtime_events = [event for event in normalized["events"] if "runtime_unavailable" in event["categories"]]
+        self.assertEqual(1, len(runtime_events))
+        self.assertEqual("containerd-deckhouse.service", runtime_events[0]["component"])
+        cgroup_event = {
+            "event_id": "cgroup",
+            "timestamp_epoch": runtime_events[0]["timestamp_epoch"] - 1,
+            "node": "node-1",
+            "categories": ["cgroup_access_denied"],
+            "source": "journal",
+            "evidence": "journal#1",
+        }
+        self.assertNotIn(
+            "cgroup_service_failure",
+            {item["correlation_id"] for item in correlate_events([cgroup_event] + runtime_events)},
+        )
+
+    def test_runtime_state_requires_explicit_loaded_state(self):
+        nodes = {
+            "node-1": {
+                "ended_at": "2026-01-01T00:10:00Z",
+                "commands": [],
+                "pod_logs": {"entries": []},
+                "facts": {
+                    "service_states": {
+                        "containerd.service": {
+                            "status": "collected",
+                            "properties": {"ActiveState": "failed"},
+                        }
+                    }
+                },
+            }
+        }
+        normalized = normalize_evidence({"collection_id": "runtime-load-unknown"}, nodes, {})
+        categories = {category for event in normalized["events"] for category in event["categories"]}
+        self.assertNotIn("runtime_unavailable", categories)
 
     def test_correlation_handles_large_single_category_stream(self):
         events = [

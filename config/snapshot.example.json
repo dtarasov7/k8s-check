@@ -10,7 +10,8 @@
     "pod_log_tail_bytes": 65536,
     "pod_log_total_bytes": 8388608,
     "pod_log_max_files": 200,
-    "collect_etcd": true
+    "collect_etcd": true,
+    "collect_cgroup": true
   },
   "ssh": {
     "connect_timeout_seconds": 10,

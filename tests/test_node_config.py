@@ -2,10 +2,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kdiag.node import KUBELET_CONFIG_KEYS, _allowlisted_top_level_config, _kubelet_certificate_rotation, _project_cri_records, _resolv_conf_facts
+from kdiag.node import KUBELET_CONFIG_KEYS, SERVICE_UNITS, _allowlisted_top_level_config, _command_specs, _kubelet_certificate_rotation, _project_cri_records, _resolv_conf_facts
 
 
 class NodeConfigTest(unittest.TestCase):
+    def test_deckhouse_containerd_is_collected_like_other_runtimes(self):
+        self.assertIn("containerd-deckhouse.service", SERVICE_UNITS)
+        journal = {check_id: argv for check_id, argv, _sensitivity in _command_specs(24)}["journal_services_current"]
+        self.assertIn("containerd-deckhouse.service", journal)
+
     def test_kubelet_cluster_dns_block_list_is_parsed(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.yaml"

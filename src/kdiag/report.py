@@ -48,7 +48,7 @@ def _node_row(name, snapshot):
         "hostname": host.get("hostname"),
         "os": os_release.get("PRETTY_NAME") or os_release.get("NAME"),
         "kernel": host.get("kernel_release"),
-        "cgroup_mode": cgroup.get("mode"),
+        "cgroup_mode": "disabled" if cgroup.get("status") == "disabled" else cgroup.get("mode"),
         "kubelet_state": kubelet.get("ActiveState"),
         "boot_id": snapshot.get("facts", {}).get("boot_id_end"),
         "ipv6_disabled": sorted(key for key, value in snapshot.get("facts", {}).get("ipv6_disable", {}).items() if str(value) == "1"),
@@ -94,6 +94,7 @@ def build_report(collection_dir):
         "schema_version": 1,
         "collection_id": collection.get("collection_id"),
         "nodes": node_inventory,
+        "options": {"collect_cgroup": collection.get("options", {}).get("collect_cgroup", True)},
         "kubernetes": {
             "status": collection.get("kubernetes", {}).get("status"),
             "sources": {
@@ -136,6 +137,7 @@ def build_report(collection_dir):
         "findings": findings,
         "prometheus_status": prometheus.get("status") if prometheus else collection.get("prometheus", {}).get("status"),
         "normalization": facts["normalization"],
+        "options": facts["options"],
     }
     root = Path(collection_dir)
     atomic_write_gzip_json(root / "normalized-events.json.gz", normalized)
@@ -148,6 +150,8 @@ def build_report(collection_dir):
         "Collection ID: `{0}`".format(markdown_escape(report["collection_id"])),
         "",
         "Статус: **{0}**".format(markdown_escape(report["status"])),
+        "",
+        "Cgroup checks: **{0}**".format("enabled" if report["options"]["collect_cgroup"] else "disabled"),
         "",
         "## Полнота сбора",
         "",

@@ -2,13 +2,13 @@
 
 ## 1. Purpose and scope
 
-<code>kdiag 0.4.0</code> creates a one-time emergency snapshot of a Kubernetes cluster and performs deterministic, fully offline analysis. It is intended for an isolated Kubernetes 1.24 environment with up to 20 nodes and about 1,000 Pods, but most checks are not tied to that exact scale.
+<code>kdiag 0.6.0</code> creates a one-time emergency snapshot of a Kubernetes cluster and performs deterministic, fully offline analysis. Its current diagnostic compatibility scope is vanilla Kubernetes and Deckhouse with Kubernetes 1.24–1.31, up to 20 nodes and about 1,000 Pods. This describes evidence/rule compatibility, not lifecycle support: Kubernetes 1.24 and 1.31 have both reached upstream end of life.
 
 The program runs on a separate management server. It connects to every node over SSH, runs read-only inspection through non-interactive sudo, and queries the Kubernetes API using a dedicated kubeconfig. Prometheus is optional: the snapshot still works when Prometheus or the entire Kubernetes API is unavailable.
 
 The current release implements only the **one-time emergency snapshot and inventory** stage. Periodic baseline collection and continuous Kubernetes/log watching are future stages.
 
-No LLM, Internet connection, external Python package, agent, DaemonSet, or database is required. Analysis is performed by a versioned rule pack. The tool does not update Kubernetes, repair the cluster, restart services, change sysctl, or mutate etcd.
+No LLM, Internet connection, external Python package, agent, DaemonSet, or database is required. Analysis is performed by a versioned rule pack. An optional command prepares minimized LLM input after collection; it does not affect the deterministic report. The tool does not update Kubernetes, repair the cluster, restart services, change sysctl, or mutate etcd.
 
 ## 2. Operating model
 
@@ -119,12 +119,67 @@ Review every binding subject before applying the manifest. Do not add Secret acc
 
 The enabled collector reads Nodes, Pods, Events, workloads, Services, EndpointSlices, PDBs, PVCs, PVs, APIService, Leases, VolumeAttachments, CSI objects, StorageClasses, NetworkPolicies, selected Cilium CRDs, allowlisted fields from the <code>cilium-config</code> and <code>coredns</code> ConfigMaps, the non-resource URL <code>/readyz</code>, and Pod logs only in approved namespaces.
 
+### Creating a kubeconfig for kdiag-reader
+
+Run these commands on a protected management server using a bootstrap kubeconfig that may apply the RBAC manifest and create ServiceAccount TokenRequests. Its current context must select the target cluster. For a one-time snapshot, prefer a short-lived token over a permanent <code>kubernetes.io/service-account-token</code> Secret.
+
 ~~~bash
-kubectl --kubeconfig /secure/kdiag.kubeconfig auth can-i get nodes
-kubectl --kubeconfig /secure/kdiag.kubeconfig auth can-i get /readyz
-kubectl --kubeconfig /secure/kdiag.kubeconfig auth can-i get pods/log -n kube-system
-kubectl --kubeconfig /secure/kdiag.kubeconfig auth can-i get secrets -A
-kubectl --kubeconfig /secure/kdiag.kubeconfig auth can-i create pods -A
+umask 077
+install -d -m 0700 /secure/kdiag
+ADMIN_KUBECONFIG=/secure/admin.kubeconfig
+KDIAG_KUBECONFIG=/secure/kdiag/kdiag-reader.kubeconfig
+KDIAG_CA=/secure/kdiag/kdiag-ca.crt
+
+kubectl --kubeconfig "$ADMIN_KUBECONFIG" apply -f deploy/kubernetes/kdiag-rbac.yaml
+kubectl --kubeconfig "$ADMIN_KUBECONFIG" -n kdiag-system get serviceaccount kdiag-reader
+
+KDIAG_SERVER="$(kubectl --kubeconfig "$ADMIN_KUBECONFIG" config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')"
+kubectl --kubeconfig "$ADMIN_KUBECONFIG" config view --raw --minify --flatten -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 --decode > "$KDIAG_CA"
+KDIAG_TOKEN="$(kubectl --kubeconfig "$ADMIN_KUBECONFIG" -n kdiag-system create token kdiag-reader --duration=8h)"
+
+test -n "$KDIAG_SERVER"
+test -s "$KDIAG_CA"
+test -n "$KDIAG_TOKEN"
+
+kubectl config set-cluster kdiag-cluster \
+  --kubeconfig "$KDIAG_KUBECONFIG" \
+  --server "$KDIAG_SERVER" \
+  --certificate-authority "$KDIAG_CA" \
+  --embed-certs=true
+kubectl config set-credentials kdiag-reader \
+  --kubeconfig "$KDIAG_KUBECONFIG" \
+  --token "$KDIAG_TOKEN"
+kubectl config set-context kdiag-reader@kdiag-cluster \
+  --kubeconfig "$KDIAG_KUBECONFIG" \
+  --cluster kdiag-cluster \
+  --user kdiag-reader \
+  --namespace kdiag-system
+kubectl config use-context kdiag-reader@kdiag-cluster \
+  --kubeconfig "$KDIAG_KUBECONFIG"
+chmod 0600 "$KDIAG_KUBECONFIG"
+unset KDIAG_TOKEN
+~~~
+
+The <code>test -s "$KDIAG_CA"</code> check intentionally stops the procedure when the CA cannot be obtained from the bootstrap kubeconfig. Do not replace it with <code>--insecure-skip-tls-verify</code>. The API server may issue a token with a shorter lifetime than the requested eight hours. After expiration, <code>kubectl</code> returns Unauthorized; refresh only the credentials in the existing kubeconfig before the next snapshot:
+
+~~~bash
+KDIAG_TOKEN="$(kubectl --kubeconfig "$ADMIN_KUBECONFIG" -n kdiag-system create token kdiag-reader --duration=8h)"
+test -n "$KDIAG_TOKEN"
+kubectl config set-credentials kdiag-reader \
+  --kubeconfig "$KDIAG_KUBECONFIG" \
+  --token "$KDIAG_TOKEN"
+chmod 0600 "$KDIAG_KUBECONFIG"
+unset KDIAG_TOKEN
+~~~
+
+Do not copy the bootstrap kubeconfig to the regular execution server or place the token in the JSON configuration. Scheduled operation requires an approved short-lived credential refresh process before each snapshot.
+
+~~~bash
+kubectl --kubeconfig /secure/kdiag/kdiag-reader.kubeconfig auth can-i get nodes
+kubectl --kubeconfig /secure/kdiag/kdiag-reader.kubeconfig auth can-i get /readyz
+kubectl --kubeconfig /secure/kdiag/kdiag-reader.kubeconfig auth can-i get pods/log -n kube-system
+kubectl --kubeconfig /secure/kdiag/kdiag-reader.kubeconfig auth can-i get secrets -A
+kubectl --kubeconfig /secure/kdiag/kdiag-reader.kubeconfig auth can-i create pods -A
 ~~~
 
 The first three checks should return yes and the last two no. Create application Role/RoleBinding objects only for explicitly approved namespaces.
@@ -166,6 +221,7 @@ Copy <code>config/snapshot.example.json</code> to an environment-specific file. 
 | <code>collection.pod_log_total_bytes</code> | 8388608 | Aggregate direct CRI logs per node. |
 | <code>collection.pod_log_max_files</code> | 200 | Maximum direct CRI files per node. |
 | <code>collection.collect_etcd</code> | true | Enable read-only local etcd health/status/alarm collection. |
+| <code>collection.collect_cgroup</code> | true | Direct cgroup facts/process mappings and related cgroup events/findings. |
 
 ### 8.2 SSH
 
@@ -230,6 +286,25 @@ python3.8 dist/kdiag.pyz snapshot \
   --kubeconfig /secure/kdiag.kubeconfig \
   --output-dir /var/lib/kdiag
 ~~~
+
+By default, <code>summary</code> progress is written to <code>stderr</code>: phases, start and completion of every inventory node, Kubernetes API, Prometheus, and report generation. <code>detail</code> also lists node evidence categories and the result of each Kubernetes API source. <code>stdout</code> still contains only the collection path, preserving machine parsing:
+
+~~~bash
+python3.8 dist/kdiag.pyz snapshot -i inventory.ini -g k8s_nodes \
+  --config config/snapshot.json --progress detail -o /var/lib/kdiag
+
+python3.8 dist/kdiag.pyz snapshot -i inventory.ini -g k8s_nodes \
+  --config config/snapshot.json --progress off -o /var/lib/kdiag
+~~~
+
+If cgroup checks are not applicable to the platform or produce unreliable noise, disable them for one run:
+
+~~~bash
+python3.8 dist/kdiag.pyz snapshot -i inventory.ini -g k8s_nodes \
+  --config config/snapshot.json --skip-cgroup -o /var/lib/kdiag
+~~~
+
+This skips direct <code>/sys/fs/cgroup</code> and <code>/proc/&lt;pid&gt;/cgroup</code> facts and suppresses cgroup events/correlations plus <code>cgroup.*</code> and <code>security_agent.cgroup_denial</code> rules. General kubelet/runtime journals remain collected, so a raw journal line may still contain the word <code>cgroup</code>, but it does not create a cgroup finding or enter prepared LLM events as a cgroup event. The setting is recorded in <code>collection.json</code>, <code>facts.json</code>, <code>report.json</code>, and <code>report.md</code>.
 
 Approved application namespaces are repeatable:
 
@@ -322,7 +397,7 @@ python3.8 dist/kdiag.pyz rules list --json
 | Rule | Type | What is checked | Safe first response |
 |---|---|---|---|
 | <code>node.kubelet_inactive</code> | fact | Collected systemd state is neither active nor activating. | Inspect kubelet status/journal and cgroup, runtime, certificate, mount prerequisites. |
-| <code>node.runtime_inactive</code> | fact | Detected containerd/CRI-O units are all inactive. | Inspect runtime journal, socket, and storage before restart. |
+| <code>node.runtime_inactive</code> | fact | No loaded vanilla containerd, Deckhouse containerd, or CRI-O unit is active. Units with LoadState=not-found and inactive alternatives beside a working runtime are ignored. | Inspect runtime journal, socket, and storage before restart. |
 | <code>node.low_root_disk</code> | fact | Root filesystem has less than 10% free. | Identify growth in images, CRI logs, journal and files; do not blindly delete runtime data. |
 | <code>node.low_inodes</code> | fact | Any collected filesystem is at least 95% out of inodes. | Find high-file-count directories and retention failures. |
 | <code>time.not_synchronized</code> | fact | NTPSynchronized=no or chrony reports unsynchronized. | Restore time source and assess timestamp/certificate reliability. |
@@ -390,6 +465,10 @@ These signatures are adapted from the pinned upstream Node Problem Detector conf
 The cluster may intentionally run without kube-proxy. Its absence alone never produces a finding; with Cilium replacement enabled, this is the supported expected state.
 
 ### 12.6 cgroup and KESL
+
+All rules in this subsection are disabled by <code>collection.collect_cgroup=false</code> or the <code>--skip-cgroup</code> CLI flag. Existing collections without the recorded option preserve the previous behavior and keep these checks enabled.
+
+Exact read-only commands for checking one node manually, together with a sanitized result template, are available in the [separate guide](cgroup-manual-checks.md).
 
 | Rule | Type | What is checked | Safe first response |
 |---|---|---|---|
@@ -487,10 +566,109 @@ The cluster may intentionally run without kube-proxy. Its absence alone never pr
 
 A backup is not required to collect. It matters before risky etcd, storage, certificate, or node remediation: confirm a recoverable backup and understood restore procedure.
 
-## 15. Known limitations
+## 15. Optional LLM package and manual external workflow
+
+LLM processing is split into explicit stages. “Minimization” means selecting bounded diagnostic evidence and excluding raw bundles/full logs. “Pseudonymization” additionally replaces internal identifiers. The commands have non-overlapping responsibilities:
+
+| Command | Creates an incident package | Pseudonymizes | Calls an LLM |
+|---|---:|---:|---:|
+| `llm prepare --profile local` | yes | no | no |
+| `llm prepare --profile external` | yes | yes | no |
+| `llm validate-export` | no | no | no |
+| `llm analyze-local` | no | no | local service only |
+| `llm import-response` | no | restores known external tokens | no |
+
+The source collection remains confidential and is never given to an inference service. Both prepare profiles omit raw node/Kubernetes bundles, full journals, and full Pod logs and enforce a package-size budget.
+
+### 15.1 Prepare a local package
+
+Create minimized input while retaining real operational identifiers inside the trusted environment:
+
+~~~bash
+python3.8 dist/kdiag.pyz llm prepare /var/lib/kdiag/<collection-id> \
+  --output-dir /secure/llm-local \
+  --profile local \
+  --mode deep-analysis \
+  --question "Explain the likely causes and evidence gaps"
+~~~
+
+This creates:
+
+~~~text
+/secure/llm-local/
+  prepared/
+    incident.local.json
+    prompt.local.txt
+    preview.md
+    redaction-report.json
+    manifest.json
+  private/
+    token-map.json
+~~~
+
+The local `prepared/` directory is not approved for external transfer. `incident.local.json` is the minimized incident package; `prompt.local.txt` is a separate model instruction artifact. `analyze-local` continues to accept a legacy local `export/` directory created by kdiag 0.5.0, validating it by content and manifest rather than by its directory name.
+
+### 15.2 Analyze an already prepared local package
+
+`analyze-local` does not read a collection and does not create another incident package. It verifies the manifest produced by `prepare --profile local`, reads `incident.local.json` and `prompt.local.txt` into the client process, and sends their contents—not file paths—to an OpenAI-compatible `/v1/chat/completions` endpoint:
+
+~~~bash
+python3.8 dist/kdiag.pyz llm analyze-local /secure/llm-local/prepared \
+  --model local-model-name \
+  --endpoint http://127.0.0.1:8080/v1/chat/completions \
+  --timeout-seconds 180 \
+  --max-output-tokens 2048 \
+  --output-dir /secure/llm-local-response
+~~~
+
+Only literal loopback HTTP addresses `127.0.0.1` and `::1` are accepted. Credentials, query strings, arbitrary endpoint paths, remote hosts, and HTTPS endpoints are rejected. The inference service must run as an unprivileged identity without kubeconfig, SSH keys, collection-directory access, shell/tools, or Internet access. The model name is required because the model/runtime is deployment-specific and is not bundled with `kdiag.pyz`.
+
+A hardened, offline llama.cpp example with a systemd unit and environment template is documented in [`deploy/systemd/README.md`](../deploy/systemd/README.md). Its pilot defaults must be tuned and benchmarked on the exact RED OS/GPU build.
+
+The analysis directory contains:
+
+~~~text
+/secure/llm-local-response/
+  response.raw.txt
+  response.validated.json      # only when contract validation succeeds
+  response.md
+  analysis-report.json
+  manifest.json
+~~~
+
+The response is always untrusted. `kdiag` validates the JSON contract and cited `EVIDENCE_NNN` identifiers and rejects responses containing mutating commands. Exit code `0` means a validated response, `1` means the service answered but the response contract was rejected, and `2` means package, endpoint, service, or I/O failure. No suggested command is executed.
+
+### 15.3 Prepare a manual external package
+
+For the manual Google “AI Search” workflow, prepare the external profile:
+
+~~~bash
+python3.8 dist/kdiag.pyz llm prepare /var/lib/kdiag/<collection-id> \
+  --output-dir /secure/llm-external \
+  --profile external \
+  --mode fast-triage \
+  --question "What are the most likely causes?"
+python3.8 dist/kdiag.pyz llm validate-export /secure/llm-external/export
+~~~
+
+The external profile replaces known topology and identity values with incident-local tokens and blocks the export when outbound DLP finds a residual IP/CIDR, MAC, DNS name, URL, e-mail, UID, absolute host path, credential pattern, private key, JWT, or canary. Component names and versions such as Kubernetes, Cilium, container runtime, etcd, CoreDNS, kernel, and RED OS are retained. Inspect `preview.md`, `incident.external.json`, `prompt.external.txt`, and `redaction-report.json`; then manually submit only the `export/` contents. Never transfer sibling `private/token-map.json`.
+
+### 15.4 Import a manually saved external response
+
+Save the external answer as a file and restore only known placeholders:
+
+~~~bash
+python3.8 dist/kdiag.pyz llm import-response /secure/google-response.txt \
+  --token-map /secure/llm-external/private/token-map.json \
+  --output-dir /secure/llm-response
+~~~
+
+The response is untrusted. The command preserves it unchanged, creates `response.restored.txt`, and reports unknown placeholders. Review every claim against cited `EVIDENCE_NNN` identifiers and the original collection before operational action.
+
+## 16. Known limitations
 
 - The pack recognizes documented structures and known signatures; it is not a universal root-cause engine.
-- There is no LLM inference or fuzzy semantic interpretation of unseen messages.
+- `kdiag` includes a loopback client but does not bundle, install, configure, or supervise a local model/runtime.
 - Remediation is advisory and never automatic.
 - Application logs need explicit namespace allowlist and RBAC.
 - Node logs assume standard journald/CRI layouts.
@@ -500,7 +678,7 @@ A backup is not required to collect. It matters before risky etcd, storage, cert
 - Automated/synthetic tests do not replace a canary on the exact RED OS 7.x, kernel, runtime, Cilium, KESL, and Kubernetes builds.
 - Baseline and continuous watch modes are not in this release.
 
-## 16. Rule provenance and maintenance
+## 17. Rule provenance and maintenance
 
 Internet is not required at runtime. Rule metadata retains source links for engineering traceability. Kernel signatures are adapted from a pinned upstream Node Problem Detector configuration; attribution is in <code>THIRD_PARTY_NOTICES.md</code>.
 

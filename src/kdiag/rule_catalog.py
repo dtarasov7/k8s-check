@@ -1,4 +1,4 @@
-RULE_PACK_VERSION = "2026.08.3"
+RULE_PACK_VERSION = "2026.08.4"
 
 
 SOURCES = {
@@ -9,6 +9,8 @@ SOURCES = {
     "k8s_logging": "https://kubernetes.io/docs/concepts/cluster-administration/logging/",
     "k8s_runtime": "https://kubernetes.io/docs/setup/production-environment/container-runtimes/",
     "k8s_124": "https://kubernetes.io/releases/1.24/",
+    "k8s_131": "https://kubernetes.io/releases/1.31/",
+    "deckhouse_containerd": "https://github.com/deckhouse/deckhouse/blob/main/CHANGELOG/CHANGELOG-v1.52.md",
     "kernel_cgroup2": "https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html",
     "kernel_psi": "https://www.kernel.org/doc/html/latest/accounting/psi.html",
     "systemd_journal": "https://www.freedesktop.org/software/systemd/man/journalctl.html",
@@ -39,7 +41,7 @@ def _entry(title, classification, sources, description):
     return {
         "title": title,
         "classification": classification,
-        "version_scope": "Kubernetes 1.24; Linux 5.x/6.x; component-specific checks require detected evidence",
+        "version_scope": "Kubernetes 1.24-1.31; Linux 5.x/6.x; component-specific checks require detected evidence",
         "sources": [SOURCES[name] for name in sources],
         "description": description,
     }
@@ -49,11 +51,11 @@ RULE_CATALOG = {
     "collector.node_gap": _entry("Неполный node snapshot", "fact", ("systemd_journal",), "Один или несколько узлов не были собраны."),
     "collector.evidence_gap": _entry("Неполные обязательные журналы", "fact", ("systemd_journal", "k8s_logging"), "Обязательный журнал завершился ошибкой, timeout или permission failure."),
     "collector.boot_changed": _entry("Перезагрузка во время сбора", "fact", ("systemd_journal",), "Boot ID изменился между началом и концом node snapshot."),
-    "inventory.mixed_kernel": _entry("Разные ядра", "fact", ("k8s_124",), "Инвентаризационный drift, сам по себе не являющийся неисправностью."),
+    "inventory.mixed_kernel": _entry("Разные ядра", "fact", ("k8s_124", "k8s_131"), "Инвентаризационный drift, сам по себе не являющийся неисправностью."),
     "node.low_root_disk": _entry("Мало места на корневой ФС", "fact", ("k8s_pressure",), "Свободно менее десяти процентов блоков корневой файловой системы."),
     "node.low_inodes": _entry("Мало inode", "fact", ("k8s_pressure",), "По df -Pi свободно менее пяти процентов inode."),
     "node.kubelet_inactive": _entry("kubelet не активен", "fact", ("k8s_nodes", "systemd_journal"), "systemd сообщает неактивное состояние kubelet."),
-    "node.runtime_inactive": _entry("Container runtime не активен", "fact", ("k8s_runtime", "systemd_journal"), "containerd или CRI-O находится вне active/activating."),
+    "node.runtime_inactive": _entry("Container runtime не активен", "fact", ("k8s_runtime", "systemd_journal", "deckhouse_containerd"), "Все загруженные containerd, containerd-deckhouse или CRI-O units находятся вне active/activating."),
     "node.oom_detected": _entry("Обнаружен OOM kill", "fact", ("kernel_psi", "k8s_pressure"), "Kernel journal или container state содержит OOM evidence."),
     "node.conntrack_full": _entry("Переполнена conntrack table", "fact", ("cilium_troubleshooting",), "Kernel journal содержит сообщение table full."),
     "node.kernel_oops": _entry("Kernel oops", "fact", ("npd_kernel_v0825",), "Kernel journal совпал с адаптированной сигнатурой NPD KernelOops."),

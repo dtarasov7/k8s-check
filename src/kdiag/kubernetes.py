@@ -690,11 +690,16 @@ def _project_list(payload, projector):
 
 
 class KubectlCollector:
-    def __init__(self, kubeconfig=None, context=None, timeout_seconds=30, max_wire_bytes=64 * 1024 * 1024):
+    def __init__(self, kubeconfig=None, context=None, timeout_seconds=30, max_wire_bytes=64 * 1024 * 1024, progress=None):
         self.kubeconfig = kubeconfig
         self.context = context
         self.timeout_seconds = timeout_seconds
         self.max_wire_bytes = max_wire_bytes
+        self.progress = progress
+
+    def _emit_progress(self, source_id, status):
+        if self.progress is not None:
+            self.progress("detail", "kubernetes/{0}: {1}".format(source_id, status))
 
     def _base(self):
         argv = ["kubectl"]
@@ -818,6 +823,7 @@ class KubectlCollector:
                     sources[source_id] = future.result()
                 except Exception as error:
                     sources[source_id] = {"id": source_id, "status": "failed", "required": required, "error": str(error)}
+                self._emit_progress(source_id, sources[source_id].get("status"))
         logs = self._collect_logs(
             sources.get("pods", {}),
             sorted(set(system_namespaces) | set(application_namespaces)),
@@ -825,6 +831,7 @@ class KubectlCollector:
             max_log_pods,
             max_log_bytes,
         ) if collect_logs else {"status": "disabled", "entries": []}
+        self._emit_progress("logs", logs.get("status"))
         return {
             "kind": "kubernetes_snapshot",
             "collected_at": utc_now(),

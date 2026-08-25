@@ -2,13 +2,13 @@
 
 ## 1. Назначение и границы решения
 
-<code>kdiag 0.4.0</code> создаёт разовый аварийный снимок Kubernetes-кластера и выполняет полностью автономный детерминированный анализ. Решение рассчитано на изолированный контур с Kubernetes 1.24, числом узлов до 20 и числом Pod до 1000, хотя большая часть проверок не привязана к этому масштабу.
+<code>kdiag 0.6.0</code> создаёт разовый аварийный снимок Kubernetes-кластера и выполняет полностью автономный детерминированный анализ. Текущий scope диагностической совместимости — vanilla Kubernetes и Deckhouse с Kubernetes 1.24–1.31, до 20 узлов и около 1000 Pod. Это scope форматов evidence и правил, а не заявление о lifecycle support: ветки Kubernetes 1.24 и 1.31 уже завершили upstream-поддержку.
 
 Программа запускается на отдельном управляющем сервере. Она подключается к каждому узлу по SSH, выполняет диагностические команды через неинтерактивный sudo и опрашивает Kubernetes API с отдельным kubeconfig. Prometheus необязателен: снимок можно получить при недоступности Prometheus или всего Kubernetes API.
 
 Текущая версия реализует только этап **«Разовый аварийный снимок и инвентаризация»**. Периодический baseline и непрерывный watch Kubernetes/журналов относятся к следующим этапам и пока отсутствуют.
 
-Для работы не требуются LLM, Интернет, внешние Python-пакеты, агенты на узлах, DaemonSet или база данных. Анализ выполняет версионируемый набор правил. Программа не обновляет Kubernetes, не исправляет кластер, не перезапускает службы, не меняет sysctl и не модифицирует etcd.
+Для работы не требуются LLM, Интернет, внешние Python-пакеты, агенты на узлах, DaemonSet или база данных. Анализ выполняет версионируемый набор правил. Необязательная команда после сбора готовит минимизированные данные для LLM и не влияет на детерминированный отчёт. Программа не обновляет Kubernetes, не исправляет кластер, не перезапускает службы, не меняет sysctl и не модифицирует etcd.
 
 ## 2. Схема работы
 
@@ -121,12 +121,67 @@ python3.8 kdiag.pyz self-test
 
 Сборщик читает Nodes, Pods, Events, workload-объекты, Services, EndpointSlices, PDB, PVC, PV, APIService, Leases, VolumeAttachments, CSI-объекты, StorageClasses, NetworkPolicies, выбранные Cilium CRD, разрешённые поля ConfigMap <code>cilium-config</code> и <code>coredns</code>, non-resource URL <code>/readyz</code> и журналы Pod только в разрешённых namespace.
 
+### Создание kubeconfig для kdiag-reader
+
+Команды выполняются на защищённом управляющем сервере с использованием bootstrap kubeconfig, которому разрешены применение RBAC-манифеста и создание ServiceAccount TokenRequest. Его текущий context должен указывать на целевой кластер. Для разового snapshot рекомендуется краткоживущий токен, а не бессрочный Secret типа <code>kubernetes.io/service-account-token</code>.
+
 ~~~bash
-kubectl --kubeconfig /secure/kdiag.kubeconfig auth can-i get nodes
-kubectl --kubeconfig /secure/kdiag.kubeconfig auth can-i get /readyz
-kubectl --kubeconfig /secure/kdiag.kubeconfig auth can-i get pods/log -n kube-system
-kubectl --kubeconfig /secure/kdiag.kubeconfig auth can-i get secrets -A
-kubectl --kubeconfig /secure/kdiag.kubeconfig auth can-i create pods -A
+umask 077
+install -d -m 0700 /secure/kdiag
+ADMIN_KUBECONFIG=/secure/admin.kubeconfig
+KDIAG_KUBECONFIG=/secure/kdiag/kdiag-reader.kubeconfig
+KDIAG_CA=/secure/kdiag/kdiag-ca.crt
+
+kubectl --kubeconfig "$ADMIN_KUBECONFIG" apply -f deploy/kubernetes/kdiag-rbac.yaml
+kubectl --kubeconfig "$ADMIN_KUBECONFIG" -n kdiag-system get serviceaccount kdiag-reader
+
+KDIAG_SERVER="$(kubectl --kubeconfig "$ADMIN_KUBECONFIG" config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')"
+kubectl --kubeconfig "$ADMIN_KUBECONFIG" config view --raw --minify --flatten -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 --decode > "$KDIAG_CA"
+KDIAG_TOKEN="$(kubectl --kubeconfig "$ADMIN_KUBECONFIG" -n kdiag-system create token kdiag-reader --duration=8h)"
+
+test -n "$KDIAG_SERVER"
+test -s "$KDIAG_CA"
+test -n "$KDIAG_TOKEN"
+
+kubectl config set-cluster kdiag-cluster \
+  --kubeconfig "$KDIAG_KUBECONFIG" \
+  --server "$KDIAG_SERVER" \
+  --certificate-authority "$KDIAG_CA" \
+  --embed-certs=true
+kubectl config set-credentials kdiag-reader \
+  --kubeconfig "$KDIAG_KUBECONFIG" \
+  --token "$KDIAG_TOKEN"
+kubectl config set-context kdiag-reader@kdiag-cluster \
+  --kubeconfig "$KDIAG_KUBECONFIG" \
+  --cluster kdiag-cluster \
+  --user kdiag-reader \
+  --namespace kdiag-system
+kubectl config use-context kdiag-reader@kdiag-cluster \
+  --kubeconfig "$KDIAG_KUBECONFIG"
+chmod 0600 "$KDIAG_KUBECONFIG"
+unset KDIAG_TOKEN
+~~~
+
+Проверка <code>test -s "$KDIAG_CA"</code> намеренно останавливает процедуру, если из bootstrap kubeconfig нельзя получить CA. Не заменяйте её параметром <code>--insecure-skip-tls-verify</code>. API server может выдать токен на меньший срок, чем запрошенные 8 часов. После истечения токена <code>kubectl</code> вернёт Unauthorized; перед следующим snapshot обновите только credentials в существующем kubeconfig:
+
+~~~bash
+KDIAG_TOKEN="$(kubectl --kubeconfig "$ADMIN_KUBECONFIG" -n kdiag-system create token kdiag-reader --duration=8h)"
+test -n "$KDIAG_TOKEN"
+kubectl config set-credentials kdiag-reader \
+  --kubeconfig "$KDIAG_KUBECONFIG" \
+  --token "$KDIAG_TOKEN"
+chmod 0600 "$KDIAG_KUBECONFIG"
+unset KDIAG_TOKEN
+~~~
+
+Не копируйте bootstrap kubeconfig на сервер постоянного запуска и не добавляйте токен в JSON-конфигурацию. Для запуска по расписанию нужен утверждённый процесс обновления краткоживущих credentials до старта snapshot.
+
+~~~bash
+kubectl --kubeconfig /secure/kdiag/kdiag-reader.kubeconfig auth can-i get nodes
+kubectl --kubeconfig /secure/kdiag/kdiag-reader.kubeconfig auth can-i get /readyz
+kubectl --kubeconfig /secure/kdiag/kdiag-reader.kubeconfig auth can-i get pods/log -n kube-system
+kubectl --kubeconfig /secure/kdiag/kdiag-reader.kubeconfig auth can-i get secrets -A
+kubectl --kubeconfig /secure/kdiag/kdiag-reader.kubeconfig auth can-i create pods -A
 ~~~
 
 Первые три команды должны вернуть yes, последние две — no. Role/RoleBinding для приложения создаётся только в явно согласованных namespace.
@@ -168,6 +223,7 @@ ssh cp01 sudo -n true
 | <code>collection.pod_log_total_bytes</code> | 8388608 | Суммарные прямые CRI-журналы одного узла. |
 | <code>collection.pod_log_max_files</code> | 200 | Число прямых CRI-файлов на узел. |
 | <code>collection.collect_etcd</code> | true | Read-only status, health и alarms локального etcd. |
+| <code>collection.collect_cgroup</code> | true | Прямые cgroup facts/process mappings и связанные cgroup events/findings. |
 
 ### 8.2 SSH
 
@@ -232,6 +288,25 @@ python3.8 dist/kdiag.pyz snapshot \
   --kubeconfig /secure/kdiag.kubeconfig \
   --output-dir /var/lib/kdiag
 ~~~
+
+По умолчанию в <code>stderr</code> выводится progress уровня <code>summary</code>: этапы, начало и завершение сбора каждого inventory-узла, Kubernetes API, Prometheus и построение отчёта. Уровень <code>detail</code> дополнительно перечисляет категории node evidence и результат каждого Kubernetes API source. <code>stdout</code> по-прежнему содержит только путь к collection, поэтому автоматический разбор не меняется:
+
+~~~bash
+python3.8 dist/kdiag.pyz snapshot -i inventory.ini -g k8s_nodes \
+  --config config/snapshot.json --progress detail -o /var/lib/kdiag
+
+python3.8 dist/kdiag.pyz snapshot -i inventory.ini -g k8s_nodes \
+  --config config/snapshot.json --progress off -o /var/lib/kdiag
+~~~
+
+Если cgroup-проверки неприменимы к платформе или создают недостоверный шум, их можно отключить для конкретного запуска:
+
+~~~bash
+python3.8 dist/kdiag.pyz snapshot -i inventory.ini -g k8s_nodes \
+  --config config/snapshot.json --skip-cgroup -o /var/lib/kdiag
+~~~
+
+При этом не читаются прямые <code>/sys/fs/cgroup</code> и <code>/proc/&lt;pid&gt;/cgroup</code> facts, подавляются cgroup events/correlations и правила <code>cgroup.*</code> и <code>security_agent.cgroup_denial</code>. Общие journals kubelet/runtime продолжают собираться, поэтому исходная строка журнала может содержать слово <code>cgroup</code>, но не создаёт cgroup finding и не попадает в подготовленные LLM events как cgroup-событие. Состояние переключателя сохраняется в <code>collection.json</code>, <code>facts.json</code>, <code>report.json</code> и <code>report.md</code>.
 
 Разрешённые прикладные namespace задаются повторяющимся параметром:
 
@@ -324,7 +399,7 @@ python3.8 dist/kdiag.pyz rules list --json
 | Правило | Тип | Что проверяется | Безопасное первое действие |
 |---|---|---|---|
 | <code>node.kubelet_inactive</code> | fact | systemd-состояние kubelet не active/activating. | Проверить status/journal и предпосылки: cgroup, runtime, сертификаты, mounts. |
-| <code>node.runtime_inactive</code> | fact | Все обнаруженные containerd/CRI-O units неактивны. | Проверить journal, socket и storage до перезапуска. |
+| <code>node.runtime_inactive</code> | fact | Ни один загруженный vanilla containerd, Deckhouse containerd или CRI-O unit не активен. Units с LoadState=not-found и неактивные альтернативы при работающем runtime игнорируются. | Проверить journal, socket и storage до перезапуска. |
 | <code>node.low_root_disk</code> | fact | На корневой ФС менее 10% свободного места. | Найти рост images, CRI logs, journal и файлов; не удалять runtime data вслепую. |
 | <code>node.low_inodes</code> | fact | На собранной ФС занято не менее 95% inode. | Найти каталоги с большим числом файлов и ошибки retention. |
 | <code>time.not_synchronized</code> | fact | NTPSynchronized=no либо chrony сообщает отсутствие синхронизации. | Восстановить источник времени и оценить достоверность timestamps/сертификатов. |
@@ -392,6 +467,10 @@ python3.8 dist/kdiag.pyz rules list --json
 Кластер может штатно работать без kube-proxy. Само его отсутствие никогда не создаёт finding; при включённом Cilium replacement это ожидаемое поддерживаемое состояние.
 
 ### 12.6 cgroup и KESL
+
+Все правила этого подраздела отключаются параметром <code>collection.collect_cgroup=false</code> или CLI-флагом <code>--skip-cgroup</code>. Для старых collection без сохранённого параметра сохраняется прежнее поведение: проверки включены.
+
+Точные read-only команды для ручной проверки одного узла и шаблон обезличенного результата приведены в [отдельной инструкции](cgroup-manual-checks-ru.md).
 
 | Правило | Тип | Что проверяется | Безопасное первое действие |
 |---|---|---|---|
@@ -489,10 +568,109 @@ python3.8 dist/kdiag.pyz rules list --json
 
 Backup не нужен для самого сбора. Он важен перед рискованным вмешательством в etcd, storage, сертификаты или узлы: необходимо подтвердить восстанавливаемый backup и понятную процедуру restore.
 
-## 15. Ограничения
+## 15. Необязательный LLM package и ручная работа с внешней LLM
+
+LLM-конвейер разделён на явные стадии. «Минимизация» означает выбор ограниченного диагностического evidence без raw bundles и полных журналов. «Псевдонимизация» дополнительно заменяет внутренние идентификаторы. Команды имеют непересекающуюся ответственность:
+
+| Команда | Создаёт incident package | Псевдонимизирует | Вызывает LLM |
+|---|---:|---:|---:|
+| `llm prepare --profile local` | да | нет | нет |
+| `llm prepare --profile external` | да | да | нет |
+| `llm validate-export` | нет | нет | нет |
+| `llm analyze-local` | нет | нет | только локальный service |
+| `llm import-response` | нет | восстанавливает известные внешние токены | нет |
+
+Исходный collection остаётся конфиденциальным и не передаётся inference service. Оба профиля исключают raw bundles узлов/Kubernetes, полные журналы и полные Pod logs и ограничивают размер package.
+
+### 15.1 Подготовка локального package
+
+Создайте минимизированные данные с сохранением реальных эксплуатационных идентификаторов внутри доверенного контура:
+
+~~~bash
+python3.8 dist/kdiag.pyz llm prepare /var/lib/kdiag/<collection-id> \
+  --output-dir /secure/llm-local \
+  --profile local \
+  --mode deep-analysis \
+  --question "Объясни вероятные причины и пробелы в evidence"
+~~~
+
+Результат:
+
+~~~text
+/secure/llm-local/
+  prepared/
+    incident.local.json
+    prompt.local.txt
+    preview.md
+    redaction-report.json
+    manifest.json
+  private/
+    token-map.json
+~~~
+
+Локальный каталог `prepared/` не разрешён для внешней передачи. `incident.local.json` — минимизированный incident package, а `prompt.local.txt` — отдельный набор инструкций модели. `analyze-local` продолжает принимать legacy-каталог local `export/`, созданный kdiag 0.5.0, проверяя содержимое и manifest, а не имя каталога.
+
+### 15.2 Анализ уже подготовленного локального package
+
+`analyze-local` не читает collection и не создаёт второй incident package. Команда проверяет manifest от `prepare --profile local`, читает `incident.local.json` и `prompt.local.txt` в клиентский процесс и передаёт локальному OpenAI-compatible endpoint `/v1/chat/completions` их содержимое, а не пути к файлам:
+
+~~~bash
+python3.8 dist/kdiag.pyz llm analyze-local /secure/llm-local/prepared \
+  --model local-model-name \
+  --endpoint http://127.0.0.1:8080/v1/chat/completions \
+  --timeout-seconds 180 \
+  --max-output-tokens 2048 \
+  --output-dir /secure/llm-local-response
+~~~
+
+Разрешены только literal loopback HTTP-адреса `127.0.0.1` и `::1`. Credentials, query string, произвольный endpoint path, удалённый host и HTTPS запрещены. Inference service должен работать под непривилегированной identity без kubeconfig, SSH keys, доступа к collection directory, shell/tools и Internet. Имя модели обязательно, поскольку конкретная модель/runtime зависят от deployment и не входят в `kdiag.pyz`.
+
+Hardened offline-пример llama.cpp с systemd unit и environment template описан в [`deploy/systemd/README-ru.md`](../deploy/systemd/README-ru.md). Его pilot defaults необходимо настроить и измерить на точной сборке РЕД ОС/GPU.
+
+Каталог анализа содержит:
+
+~~~text
+/secure/llm-local-response/
+  response.raw.txt
+  response.validated.json      # только при успешной проверке контракта
+  response.md
+  analysis-report.json
+  manifest.json
+~~~
+
+Ответ всегда считается недоверенным. `kdiag` проверяет JSON-контракт, указанные `EVIDENCE_NNN` и отклоняет ответы с изменяющими командами. Код `0` означает проверенный ответ, `1` — service ответил, но контракт отклонён, `2` — ошибка package, endpoint, service или I/O. Предложенные команды никогда не исполняются.
+
+### 15.3 Подготовка ручного внешнего package
+
+Для ручной работы с Google «Поиск ИИ» подготовьте внешний профиль:
+
+~~~bash
+python3.8 dist/kdiag.pyz llm prepare /var/lib/kdiag/<collection-id> \
+  --output-dir /secure/llm-external \
+  --profile external \
+  --mode fast-triage \
+  --question "Каковы наиболее вероятные причины?"
+python3.8 dist/kdiag.pyz llm validate-export /secure/llm-external/export
+~~~
+
+Внешний профиль заменяет известные значения топологии и identities на incident-local tokens и запрещает экспорт, если outbound DLP обнаруживает остаточный IP/CIDR, MAC, DNS, URL, e-mail, UID, абсолютный host path, credential pattern, private key, JWT или canary. Названия и версии Kubernetes, Cilium, container runtime, etcd, CoreDNS, kernel и RED OS сохраняются. Просмотрите `preview.md`, `incident.external.json`, `prompt.external.txt` и `redaction-report.json`, после чего вручную передайте только содержимое `export/`. Соседний `private/token-map.json` передавать нельзя.
+
+### 15.4 Импорт сохранённого вручную внешнего ответа
+
+Сохраните внешний ответ в файл и восстановите только известные placeholders:
+
+~~~bash
+python3.8 dist/kdiag.pyz llm import-response /secure/google-response.txt \
+  --token-map /secure/llm-external/private/token-map.json \
+  --output-dir /secure/llm-response
+~~~
+
+Ответ считается недоверенным. Команда сохраняет его без изменений, создаёт `response.restored.txt` и отмечает неизвестные placeholders. Перед любыми действиями проверяйте claims по указанным `EVIDENCE_NNN` и исходному collection.
+
+## 16. Ограничения
 
 - Rule pack распознаёт известные структуры и сигнатуры, но не является универсальным root-cause engine.
-- Нет LLM и нечёткого семантического распознавания новых сообщений.
+- `kdiag` содержит loopback-клиент, но не поставляет, не устанавливает, не настраивает и не контролирует локальную модель/runtime.
 - Рекомендации не исполняются автоматически.
 - Прикладные logs требуют явного allowlist namespace и RBAC.
 - Сбор на узле предполагает стандартные journald/CRI layouts.
@@ -502,7 +680,7 @@ Backup не нужен для самого сбора. Он важен пере�
 - Автоматические и синтетические тесты не заменяют canary на точных сборках RED OS 7.x, ядра, runtime, Cilium, KESL и Kubernetes.
 - Baseline и continuous watch в эту версию не входят.
 
-## 16. Происхождение и сопровождение правил
+## 17. Происхождение и сопровождение правил
 
 Интернет во время работы не нужен. В metadata правил сохранены ссылки для инженерной трассировки. Kernel-сигнатуры адаптированы из зафиксированной upstream-конфигурации Node Problem Detector; атрибуция находится в <code>THIRD_PARTY_NOTICES.md</code>.
 

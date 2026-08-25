@@ -100,6 +100,93 @@ class RulesTest(unittest.TestCase):
         self.assertIn("inventory.mixed_kernel", rule_ids)
         self.assertIn("network.ipv6_disabled", rule_ids)
 
+    def test_runtime_service_detection_supports_deckhouse_and_ignores_not_found(self):
+        snapshot = node_snapshot("6.1")
+        snapshot["facts"]["service_states"].update(
+            {
+                "containerd.service": {
+                    "status": "collected",
+                    "properties": {"LoadState": "not-found", "ActiveState": "inactive"},
+                },
+                "containerd-deckhouse.service": {
+                    "status": "collected",
+                    "properties": {"LoadState": "loaded", "ActiveState": "active"},
+                },
+                "crio.service": {
+                    "status": "collected",
+                    "properties": {"LoadState": "not-found", "ActiveState": "inactive"},
+                },
+            }
+        )
+        collection = {"nodes": [{"host": "node-1", "status": "collected"}]}
+        rule_ids = {item["rule_id"] for item in evaluate_rules(collection, {"node-1": snapshot}, {})}
+        self.assertNotIn("node.runtime_inactive", rule_ids)
+
+        snapshot["facts"]["service_states"]["containerd-deckhouse.service"]["properties"]["ActiveState"] = "failed"
+        rule_ids = {item["rule_id"] for item in evaluate_rules(collection, {"node-1": snapshot}, {})}
+        self.assertIn("node.runtime_inactive", rule_ids)
+
+    def test_kubernetes_131_versions_are_in_scope(self):
+        kubernetes = {
+            "sources": {
+                "nodes": {
+                    "status": "collected",
+                    "data": {"items": [{"metadata": {"name": "node-1"}, "status": {"nodeInfo": {"kubeletVersion": "v1.31.14"}}}]},
+                },
+                "pods": {
+                    "status": "collected",
+                    "data": {
+                        "items": [
+                            {
+                                "metadata": {"namespace": "kube-system", "name": "kube-apiserver-node-1"},
+                                "spec": {"containers": [{"name": "kube-apiserver", "image": "registry/kube-apiserver:v1.31.14"}]},
+                                "status": {"phase": "Running", "containerStatuses": [{"name": "kube-apiserver", "ready": True}]},
+                            }
+                        ]
+                    },
+                },
+            }
+        }
+        rule_ids = {item["rule_id"] for item in evaluate_rules({"nodes": []}, {}, kubernetes)}
+        self.assertNotIn("inventory.unsupported_version_skew", rule_ids)
+
+    def test_disabled_cgroup_checks_produce_no_cgroup_findings(self):
+        snapshot = node_snapshot("6.1")
+        snapshot["facts"]["cgroup"] = {"mode": "v2", "controllers": []}
+        snapshot["facts"]["kubelet_config"] = {"values": {"cgroupDriver": "systemd"}}
+        snapshot["commands"] = [
+            {"id": "installed_packages", "stdout": "kesl|12.1"},
+            {"id": "journal_services_current", "stdout": "cgroup permission denied"},
+            {"id": "runtime_crictl_info", "stdout": '{"SystemdCgroup":false}'},
+        ]
+        normalized = {
+            "events": [],
+            "correlations": [
+                {
+                    "correlation_id": "cgroup_service_failure",
+                    "scope": "node-1",
+                    "categories": ["cgroup_access_denied", "runtime_unavailable"],
+                    "sources": ["journal"],
+                    "window_seconds": 900,
+                    "evidence": ["e1", "e2"],
+                }
+            ],
+        }
+        collection = {
+            "nodes": [{"host": "node-1", "status": "collected"}],
+            "options": {"collect_cgroup": False},
+        }
+        rule_ids = {item["rule_id"] for item in evaluate_rules(collection, {"node-1": snapshot}, {}, normalized)}
+        self.assertFalse(
+            {
+                "cgroup.controllers_missing",
+                "cgroup.driver_mismatch",
+                "cgroup.service_failure",
+                "security_agent.cgroup_denial",
+            }
+            & rule_ids
+        )
+
     def test_kube_proxy_free_cilium_cluster_is_supported(self):
         kubernetes = {
             "sources": {
@@ -149,7 +236,10 @@ class RulesTest(unittest.TestCase):
         snapshot["facts"]["service_states"].update(
             {
                 "kubelet.service": {"status": "collected", "properties": {"ActiveState": "failed"}},
-                "containerd.service": {"status": "collected", "properties": {"ActiveState": "failed"}},
+                "containerd.service": {
+                    "status": "collected",
+                    "properties": {"LoadState": "loaded", "ActiveState": "failed"},
+                },
                 "crio.service": {"status": "unavailable", "properties": {}},
             }
         )

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from kdiag import __version__
 from kdiag.runner import run_check, run_process
+from kdiag.runtime import RUNTIME_SERVICE_UNITS
 from kdiag.util import SCHEMA_VERSION, sha256_file, utc_now
 
 
@@ -29,10 +30,7 @@ PACKAGE_PREFIXES = (
     "iproute",
 )
 
-SERVICE_UNITS = (
-    "kubelet.service",
-    "containerd.service",
-    "crio.service",
+SERVICE_UNITS = ("kubelet.service",) + RUNTIME_SERVICE_UNITS + (
     "NetworkManager.service",
     "kesl.service",
     "kesl-supervisor.service",
@@ -47,6 +45,14 @@ HASH_PATTERNS = (
     "/etc/systemd/system/kubelet.service.d/*",
     "/usr/lib/systemd/system/kubelet.service",
     "/usr/lib/systemd/system/containerd.service",
+    "/etc/systemd/system/containerd.service",
+    "/etc/systemd/system/containerd.service.d/*",
+    "/usr/lib/systemd/system/containerd-deckhouse.service",
+    "/etc/systemd/system/containerd-deckhouse.service",
+    "/etc/systemd/system/containerd-deckhouse.service.d/*",
+    "/usr/lib/systemd/system/crio.service",
+    "/etc/systemd/system/crio.service",
+    "/etc/systemd/system/crio.service.d/*",
     "/etc/containerd/config.toml",
     "/etc/crio/crio.conf",
 )
@@ -368,7 +374,7 @@ def _kubelet_certificate_rotation(root="/var/lib/kubelet/pki"):
 def _service_states(timeout_seconds, max_bytes):
     states = {}
     properties = (
-        "Id,LoadState,ActiveState,SubState,Result,MainPID,ExecMainStatus,FragmentPath,"
+        "Id,LoadState,ActiveState,SubState,Result,MainPID,ExecMainStatus,UnitFileState,FragmentPath,"
         "DropInPaths,ControlGroup,Delegate,Slice,ExecStart"
     )
     for unit in SERVICE_UNITS:
@@ -660,7 +666,7 @@ def _pod_log_snapshot(namespaces, tail_bytes, total_bytes, max_files):
     return {"status": status, "entries": entries, "errors": errors, "bytes": consumed, "candidate_files": len(candidates)}
 
 
-def collect_node_snapshot(since_hours, timeout_seconds, max_command_bytes, system_namespaces, application_namespaces, pod_log_tail_bytes, pod_log_total_bytes, pod_log_max_files, collect_etcd=False):
+def collect_node_snapshot(since_hours, timeout_seconds, max_command_bytes, system_namespaces, application_namespaces, pod_log_tail_bytes, pod_log_total_bytes, pod_log_max_files, collect_etcd=False, collect_cgroup=True):
     started_at = utc_now()
     boot_start = _boot_id()
     commands = []
@@ -680,6 +686,7 @@ def collect_node_snapshot(since_hours, timeout_seconds, max_command_bytes, syste
         "started_at": started_at,
         "ended_at": utc_now(),
         "sensitivity": "confidential",
+        "options": {"collect_cgroup": collect_cgroup},
         "host": {
             "hostname": socket.gethostname(),
             "fqdn": socket.getfqdn(),
@@ -698,12 +705,12 @@ def collect_node_snapshot(since_hours, timeout_seconds, max_command_bytes, syste
             "pressure_io": _read_text("/proc/pressure/io", 64 * 1024),
             "root_disk": _root_disk(),
             "ipv6_disable": _ipv6_disable_values(),
-            "cgroup": _cgroup_facts(),
+            "cgroup": _cgroup_facts() if collect_cgroup else {"status": "disabled"},
             "kubelet_config": kubelet_config,
             "resolv_conf": _resolv_conf_facts(resolv_path),
             "swaps": _read_text("/proc/swaps", 64 * 1024),
             "service_states": service_states,
-            "process_cgroups": _process_cgroups(service_states),
+            "process_cgroups": _process_cgroups(service_states) if collect_cgroup else {"status": "disabled"},
             "file_hashes": _file_hashes(),
             "sysctl_assignments": _sysctl_assignments(),
             "certificates": _certificate_metadata(timeout_seconds, max_command_bytes),

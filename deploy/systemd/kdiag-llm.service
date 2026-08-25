@@ -1,0 +1,60 @@
+[Unit]
+Description=kdiag local llama.cpp inference service
+After=local-fs.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=kdiag-llm
+Group=kdiag-llm
+EnvironmentFile=/etc/kdiag-llm/llama-server.env
+Environment=LLAMA_CACHE=/var/cache/kdiag-llm
+ExecStart=/opt/kdiag-llm/bin/llama-server --offline --log-disable --no-webui --no-slots --no-agent --no-cors-credentials
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGINT
+TimeoutStopSec=120
+
+RuntimeDirectory=kdiag-llm
+RuntimeDirectoryMode=0700
+CacheDirectory=kdiag-llm
+CacheDirectoryMode=0700
+WorkingDirectory=/var/cache/kdiag-llm
+UMask=0077
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateMounts=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RemoveIPC=true
+KeyringMode=private
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=127.0.0.0/8
+IPAddressAllow=::1/128
+ReadOnlyPaths=/opt/kdiag-llm /etc/kdiag-llm
+ReadWritePaths=/var/cache/kdiag-llm /run/kdiag-llm
+
+LimitCORE=0
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+TasksMax=1024
+StandardInput=null
+StandardOutput=null
+StandardError=journal
+SyslogIdentifier=kdiag-llm
+
+[Install]
+WantedBy=multi-user.target

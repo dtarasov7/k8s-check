@@ -53,11 +53,18 @@ def _node_arguments(config):
     ]
     if collection["collect_etcd"]:
         arguments.append("--collect-etcd")
+    if not collection["collect_cgroup"]:
+        arguments.append("--skip-cgroup")
     for namespace in config["kubernetes"]["system_namespaces"]:
         arguments.extend(["--system-namespace", namespace])
     for namespace in config["kubernetes"]["application_namespaces"]:
         arguments.extend(["--application-namespace", namespace])
     return arguments
+
+
+def _emit_progress(progress, level, message):
+    if progress is not None:
+        progress(level, message)
 
 
 def _preflight_disk(output_root, host_count, config):
@@ -69,9 +76,10 @@ def _preflight_disk(output_root, host_count, config):
         raise RuntimeError("not enough free disk: required at least {0} bytes, available {1}".format(required, free))
 
 
-def run_snapshot(inventory_path, group, output_root, config):
+def run_snapshot(inventory_path, group, output_root, config, progress=None):
     started_at = utc_now()
     collection_id = _collection_id()
+    _emit_progress(progress, "summary", "collection {0}: initialization".format(collection_id))
     root = Path(output_root).resolve()
     root_existed = root.exists()
     root.mkdir(parents=True, exist_ok=True)
@@ -86,6 +94,11 @@ def run_snapshot(inventory_path, group, output_root, config):
         default_user=config["ssh"]["user"],
         default_port=config["ssh"]["port"],
     )
+    _emit_progress(
+        progress,
+        "summary",
+        "inventory: {0} node(s): {1}".format(len(hosts), ", ".join(host.name for host in hosts)),
+    )
     _preflight_disk(root, len(hosts), config)
     transport = SSHTransport(
         config["ssh"]["connect_timeout_seconds"],
@@ -93,6 +106,26 @@ def run_snapshot(inventory_path, group, output_root, config):
         config["collection"]["max_node_bundle_bytes"],
     )
     node_results = []
+    node_sources = ["OS/kernel/boot", "packages", "systemd/kubelet/runtime", "journals", "network/sysctl", "storage/PSI/resources", "configs/certificates", "CRI/pod logs"]
+    if config["collection"]["collect_cgroup"]:
+        node_sources.append("cgroup")
+    if config["collection"]["collect_etcd"]:
+        node_sources.append("etcd")
+    worker_count = min(config["collection"]["parallelism"], len(hosts))
+    _emit_progress(progress, "summary", "nodes: collection started with {0} worker(s)".format(worker_count))
+
+    def collect_host(host, agent_path, destination):
+        _emit_progress(progress, "summary", "node {0}: started".format(host.name))
+        _emit_progress(progress, "detail", "node {0}: collecting {1}".format(host.name, ", ".join(node_sources)))
+        return transport.collect_node(
+            host,
+            agent_path,
+            destination,
+            collection_id,
+            _node_arguments(config),
+            max(config["collection"]["command_timeout_seconds"] * 10, 300),
+        )
+
     with tempfile.TemporaryDirectory(prefix="kdiag-agent-") as temporary_directory:
         agent_path = Path(temporary_directory) / "kdiag.pyz"
         _agent_archive(agent_path)
@@ -100,26 +133,31 @@ def run_snapshot(inventory_path, group, output_root, config):
             futures = {}
             for host in hosts:
                 destination = collection_dir / "node-{0}.json.gz".format(host.name)
-                future = executor.submit(
-                    transport.collect_node,
-                    host,
-                    agent_path,
-                    destination,
-                    collection_id,
-                    _node_arguments(config),
-                    max(config["collection"]["command_timeout_seconds"] * 10, 300),
-                )
+                future = executor.submit(collect_host, host, agent_path, destination)
                 futures[future] = host.name
-            for future in as_completed(futures):
+            for completed_count, future in enumerate(as_completed(futures), 1):
                 host_name = futures[future]
                 try:
-                    node_results.append(future.result())
+                    node_result = future.result()
                 except Exception as error:
-                    node_results.append({"host": host_name, "status": "failed", "error": str(error)})
+                    node_result = {"host": host_name, "status": "failed", "error": str(error)}
+                node_results.append(node_result)
+                _emit_progress(
+                    progress,
+                    "summary",
+                    "node {0}: {1} ({2}/{3}, {4} ms)".format(
+                        host_name,
+                        node_result.get("status"),
+                        completed_count,
+                        len(hosts),
+                        node_result.get("duration_ms", "n/a"),
+                    ),
+                )
     node_results.sort(key=lambda item: item.get("host") or "")
 
     kubernetes_result = {"status": "disabled", "file": None, "error": None}
     if config["kubernetes"]["enabled"]:
+        _emit_progress(progress, "summary", "kubernetes API: collection started")
         if not config["kubernetes"].get("kubeconfig"):
             kubernetes_result = {"status": "configuration_error", "file": None, "error": "kubernetes.kubeconfig is required"}
         elif not Path(config["kubernetes"]["kubeconfig"]).is_file():
@@ -130,6 +168,7 @@ def run_snapshot(inventory_path, group, output_root, config):
                 context=config["kubernetes"].get("context"),
                 timeout_seconds=config["kubernetes"]["command_timeout_seconds"],
                 max_wire_bytes=config["kubernetes"]["max_wire_bytes"],
+                progress=progress,
             )
             snapshot = collector.collect(
                 config["kubernetes"]["system_namespaces"],
@@ -147,7 +186,11 @@ def run_snapshot(inventory_path, group, output_root, config):
                 kubernetes_result = {"status": "truncated", "file": None, "error": "projected Kubernetes bundle exceeds limit"}
             else:
                 kubernetes_result = {"status": kube_status, "file": path.name, "error": None}
+        _emit_progress(progress, "summary", "kubernetes API: {0}".format(kubernetes_result.get("status")))
+    else:
+        _emit_progress(progress, "summary", "kubernetes API: disabled")
 
+    _emit_progress(progress, "summary", "prometheus: collection started")
     prometheus_snapshot = collect_prometheus(
         config["prometheus"].get("url"),
         config["prometheus"]["timeout_seconds"],
@@ -156,6 +199,7 @@ def run_snapshot(inventory_path, group, output_root, config):
     prometheus_path = collection_dir / "prometheus.json.gz"
     atomic_write_gzip_json(prometheus_path, prometheus_snapshot)
     prometheus_result = {"status": prometheus_snapshot.get("status"), "file": prometheus_path.name, "error": prometheus_snapshot.get("error")}
+    _emit_progress(progress, "summary", "prometheus: {0}".format(prometheus_result.get("status")))
 
     all_nodes_collected = all(item.get("status") == "collected" for item in node_results)
     kubernetes_ok = not config["kubernetes"]["enabled"] or kubernetes_result.get("status") == "collected"
@@ -169,6 +213,7 @@ def run_snapshot(inventory_path, group, output_root, config):
         "started_at": started_at,
         "ended_at": utc_now(),
         "inventory": {"path": str(Path(inventory_path).resolve()), "group": group, "host_count": len(hosts)},
+        "options": {"collect_cgroup": config["collection"]["collect_cgroup"]},
         "limits": {
             "max_node_bundle_bytes": config["collection"]["max_node_bundle_bytes"],
             "central_reserve_bytes": config["collection"]["central_reserve_bytes"],
@@ -178,6 +223,8 @@ def run_snapshot(inventory_path, group, output_root, config):
         "prometheus": prometheus_result,
     }
     atomic_write_json(collection_dir / "collection.json", collection)
+    _emit_progress(progress, "summary", "analysis: normalization, rules and reports")
     build_report(collection_dir)
     write_manifest(collection_dir)
+    _emit_progress(progress, "summary", "collection {0}: {1}".format(collection_id, collection_status))
     return collection_dir, collection_status

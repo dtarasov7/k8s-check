@@ -37,6 +37,18 @@ class ConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "collect_etcd must be boolean"):
                 load_config(path)
 
+    def test_collect_cgroup_can_be_disabled_and_requires_boolean(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({"collection": {"collect_cgroup": False}}), encoding="utf-8")
+            config = load_config(path)
+        self.assertFalse(config["collection"]["collect_cgroup"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({"collection": {"collect_cgroup": "no"}}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "collect_cgroup must be boolean"):
+                load_config(path)
+
 
 if __name__ == "__main__":
     unittest.main()

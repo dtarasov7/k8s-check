@@ -1,6 +1,6 @@
 # Автономный rule pack kdiag
 
-Rule pack `2026.08.3` содержит 93 проверки и работает без сети, LLM и внешней базы знаний. После сборки все классификаторы, карточки правил, ссылки на первичные источники и synthetic self-test входят в `kdiag.pyz`.
+Rule pack `2026.08.4` содержит 93 проверки и работает без сети, LLM и внешней базы знаний. После сборки все классификаторы, карточки правил, ссылки на первичные источники и synthetic self-test входят в `kdiag.pyz`.
 
 ## Модель достоверности
 
@@ -24,7 +24,7 @@ Rule pack `2026.08.3` содержит 93 проверки и работает �
 
 - collector gaps, reboot boundary и mixed kernel inventory;
 - root disk и inode exhaustion;
-- kubelet/container runtime state;
+- kubelet/container runtime state для vanilla containerd, CRI-O и Deckhouse containerd с исключением отсутствующих/неиспользуемых альтернативных units;
 - Node Ready/Unknown, Memory/Disk/PID pressure и NetworkUnavailable;
 - CrashLoopBackOff, image pull, OOMKilled, FailedScheduling, eviction, init/container failures, restart storms и kind-specific rollout failures;
 - PDB health и возможность voluntary disruption;
@@ -51,6 +51,8 @@ Rule pack `2026.08.3` содержит 93 проверки и работает �
 Источники использовались при подготовке, но runtime-доступ к ним не требуется:
 
 - Kubernetes 1.24 release/tag: <https://kubernetes.io/releases/1.24/>;
+- Kubernetes 1.31 release/tag: <https://kubernetes.io/releases/1.31/>;
+- Deckhouse rename of its containerd systemd unit: <https://github.com/deckhouse/deckhouse/blob/main/CHANGELOG/CHANGELOG-v1.52.md>;
 - Node conditions: <https://kubernetes.io/docs/reference/node/node-status/>;
 - Pod diagnostics и FailedScheduling: <https://kubernetes.io/docs/tasks/debug/debug-application/debug-running-pod/>;
 - probes: <https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-probes/>;

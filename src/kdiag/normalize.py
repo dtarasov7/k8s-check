@@ -4,6 +4,7 @@ import re
 from datetime import datetime, timezone
 
 from kdiag.npd_rules import NPD_CATEGORY_PATTERNS
+from kdiag.runtime import ACTIVE_SERVICE_STATES, RUNTIME_SERVICE_UNITS, loaded_runtime_service_states, runtime_service_is_active
 
 
 MAX_NORMALIZED_EVENTS = 50000
@@ -502,13 +503,20 @@ def _normalize_kubernetes_logs(kubernetes, events, unknown, stats, pod_nodes):
 
 def _normalize_service_states(node_name, snapshot, events, stats):
     timestamp = snapshot.get("ended_at")
-    for unit, state in snapshot.get("facts", {}).get("service_states", {}).items():
+    service_states = snapshot.get("facts", {}).get("service_states", {})
+    loaded_runtimes = loaded_runtime_service_states(service_states)
+    has_active_runtime = any(runtime_service_is_active(state) for state in loaded_runtimes.values())
+    for unit, state in service_states.items():
         properties = state.get("properties", {})
-        if state.get("status") != "collected" or properties.get("ActiveState") in ("active", "activating"):
+        if state.get("status") != "collected" or properties.get("ActiveState") in ACTIVE_SERVICE_STATES:
             continue
         if unit == "kubelet.service":
+            if properties.get("LoadState") not in (None, "loaded"):
+                continue
             categories = ["kubelet_inactive"]
-        elif unit in ("containerd.service", "crio.service"):
+        elif unit in RUNTIME_SERVICE_UNITS:
+            if unit not in loaded_runtimes or has_active_runtime:
+                continue
             categories = ["runtime_unavailable"]
         else:
             continue
@@ -555,6 +563,7 @@ def correlate_events(events, window_seconds=CORRELATION_WINDOW_SECONDS):
                     event
                     for event in scoped_events
                     if event.get("timestamp_epoch") is not None
+                    and not (event.get("source") == "systemd_state" and event.get("timestamp_inferred"))
                     and set(event.get("categories", ())) & relevant_categories
                 ),
                 key=lambda event: (event["timestamp_epoch"], event["event_id"]),
@@ -605,6 +614,7 @@ def normalize_evidence(collection, node_snapshots, kubernetes):
         "malformed_records": 0,
         "dropped_records": 0,
         "unknown_fingerprint_replacements": 0,
+        "cgroup_events_suppressed": 0,
         "truncated": False,
     }
     for node_name, snapshot in sorted(node_snapshots.items()):
@@ -616,6 +626,20 @@ def normalize_evidence(collection, node_snapshots, kubernetes):
     _normalize_node_conditions(kubernetes, events, stats)
     _normalize_pod_states(kubernetes, events, stats, pod_nodes)
     _normalize_kubernetes_logs(kubernetes, events, unknown, stats, pod_nodes)
+    if collection.get("options", {}).get("collect_cgroup", True) is False:
+        filtered_events = []
+        for event in events:
+            categories = [category for category in event.get("categories", []) if category != "cgroup_access_denied"]
+            if len(categories) == len(event.get("categories", [])):
+                filtered_events.append(event)
+                continue
+            stats["cgroup_events_suppressed"] += 1
+            if categories:
+                filtered_event = dict(event)
+                filtered_event["categories"] = categories
+                filtered_event["severity"] = _severity(categories)
+                filtered_events.append(filtered_event)
+        events = filtered_events
     events.sort(key=lambda event: (event.get("timestamp_epoch") or 0, event["event_id"]))
     unknown_values = sorted(unknown.values(), key=lambda item: (-item["count"], item["component"], item["fingerprint"]))
     stats["unknown_retained_fingerprints"] = len(unknown_values)

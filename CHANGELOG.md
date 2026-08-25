@@ -6,6 +6,48 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Added `collection.collect_cgroup=false` and `--skip-cgroup`: direct cgroup facts are not collected, cgroup events/correlations and related findings are suppressed, and the selected mode is recorded in collections and reports.
+- Added disableable `--progress off|summary|detail` execution visualization on `stderr`, covering phases, per-node state, node evidence categories, and Kubernetes API source statuses.
+- Added Deckhouse `containerd-deckhouse.service` support alongside vanilla `containerd.service` and `crio.service`; expanded the rule-pack scope to Kubernetes 1.24–1.31.
+
+### Fixed
+
+- Runtime units with `LoadState=not-found` no longer produce `runtime_unavailable` or `node.runtime_inactive`; an inactive alternative runtime is ignored while another loaded runtime is working.
+- Static systemd state no longer gains artificial temporal causality in 15-minute correlations; temporal correlation now requires an actual timestamped event.
+
+### Documentation
+
+- Added step-by-step creation of a dedicated kubeconfig for the `kdiag-reader` ServiceAccount, including a short-lived TokenRequest, embedded CA, `0600` file mode, token renewal, and RBAC verification.
+- Added a separate guide with exact read-only commands for manual node cgroup checks and a sanitized result template.
+
+## [0.6.0] - 2026-08-24
+
+### Added
+
+- Added `kdiag llm analyze-local` for verified prepared local packages and OpenAI-compatible chat-completions services on literal loopback addresses.
+- Added bounded response handling, evidence-ID/contract validation, mutating-command rejection, Markdown rendering, and SHA-256 manifests for local analysis results.
+- Added a hardened llama.cpp systemd deployment example with loopback/offline defaults, an unprivileged service identity, disabled logging/UI/agent mode, and bilingual installation guidance for RED OS.
+
+### Security
+
+- The local client disables proxies and redirects, never sends collection paths, rejects non-loopback endpoints, and does not execute model suggestions.
+- New local packages use `prepared/` instead of the misleading `export/`; `analyze-local` remains compatible with legacy local `export/` packages created by version 0.5.0.
+
+## [0.5.0] - 2026-08-24
+
+### Added
+
+- Added the first optional LLM integration stage: minimized, size-bounded incident packages and versioned prompts for `fast-triage` and `deep-analysis`.
+- Added a fail-closed external profile with incident-local pseudonyms, outbound DLP, a private `0600` token map, export manifest validation, and exact restoration of known tokens in a manually saved response.
+- Added `kdiag llm prepare`, `llm validate-export`, and `llm import-response`; no model runtime, browser automation, or external network client is included.
+- Added response-contract checks for evidence IDs and mutating commands; raw external responses remain preserved as untrusted audit input.
+
+### Security
+
+- External packages remove known internal host, Kubernetes object, account, IP/MAC/CIDR, DNS, URL, UID, host-path, and endpoint-port values while retaining diagnostic component names and versions.
+
 ## [0.4.0] - 2026-08-24
 
 ### Added

@@ -1,0 +1,32 @@
+@startuml
+title Граница данных необязательного LLM-контура
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+
+actor "Оператор инцидента" as Operator
+database "Конфиденциальный collection kdiag\nисходный evidence узлов и Kubernetes" as Collection
+component "Подготовка данных kdiag\nминимизация, псевдонимизация, DLP" as Kdiag
+folder "Локальный incident package\nидентификаторы сохранены" as LocalPackage
+folder "Внешний export\nincident, prompt, preview, manifest" as ExternalExport
+folder "Приватная таблица соответствий\nрежим 0600" as TokenMap
+cloud "Отдельный локальный inference service\nбез credentials кластера и tools" as LocalLLM
+cloud "Google Поиск ИИ\nтолько ручная работа" as Google
+
+Operator --> Kdiag : подготовка и проверка
+Kdiag --> Collection : чтение derived evidence
+Kdiag --> LocalPackage : локальный профиль
+LocalPackage ..> LocalLLM : передача содержимого по loopback HTTP
+Kdiag --> ExternalExport : внешний профиль после DLP
+Kdiag --> TokenMap : исходные значения остаются локально
+Operator --> ExternalExport : проверка каждого экспортируемого файла
+Operator --> Google : ручная передача проверенного export
+Google --> Operator : ручное сохранение недоверенного ответа
+Operator --> Kdiag : импорт ответа
+Kdiag --> TokenMap : восстановление только известных токенов
+
+TokenMap -[hidden]-> Google
+note on link
+  Передача запрещена
+end note
+@enduml

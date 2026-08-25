@@ -21,7 +21,7 @@ class ReportTest(unittest.TestCase):
                         "boot_changed_during_collection": False,
                         "root_disk": {"total_bytes": 100, "free_bytes": 50},
                         "ipv6_disable": {},
-                        "cgroup": {"mode": "v2", "controllers": ["cpu", "io"]},
+                        "cgroup": {"status": "disabled"},
                         "service_states": {"kubelet.service": {"status": "collected", "properties": {"ActiveState": "active"}}},
                     },
                     "commands": [],
@@ -45,6 +45,7 @@ class ReportTest(unittest.TestCase):
                     "status": "partial",
                     "started_at": "start",
                     "ended_at": "end",
+                    "options": {"collect_cgroup": False},
                     "nodes": [
                         {"host": "n1", "status": "collected", "file": "node-n1.json.gz"},
                         {"host": "n2", "status": "unreachable", "error": "ssh failed"},
@@ -64,6 +65,9 @@ class ReportTest(unittest.TestCase):
             self.assertEqual("collected", coverage["kubernetes/nodes"])
             self.assertEqual("failed", coverage["kubernetes/events"])
             self.assertIn("collector.node_gap", {item["rule_id"] for item in report["findings"]})
+            self.assertFalse(report["options"]["collect_cgroup"])
+            self.assertEqual("disabled", report["node_inventory"][0]["cgroup_mode"])
+            self.assertIn("Cgroup checks: **disabled**", (root / "report.md").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

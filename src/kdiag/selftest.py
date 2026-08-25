@@ -38,7 +38,10 @@ def run_self_test():
             {
                 "id": "journal_services_current",
                 "status": "collected",
-                "stdout": '{"__REALTIME_TIMESTAMP":"1767225600000000","_SYSTEMD_UNIT":"kubelet.service","MESSAGE":"write /sys/fs/cgroup/x/io.max: operation not permitted"}\n',
+                "stdout": (
+                    '{"__REALTIME_TIMESTAMP":"1767225600000000","_SYSTEMD_UNIT":"kubelet.service","MESSAGE":"write /sys/fs/cgroup/x/io.max: operation not permitted"}\n'
+                    '{"__REALTIME_TIMESTAMP":"1767225660000000","_SYSTEMD_UNIT":"kubelet.service","MESSAGE":"container runtime is down"}\n'
+                ),
             },
             {
                 "id": "journal_kernel_current",
@@ -54,7 +57,7 @@ def run_self_test():
             "cgroup": {"mode": "v2", "controllers": ["cpu", "io", "memory", "pids"]},
             "certificates": [],
             "service_states": {
-                "kubelet.service": {"status": "collected", "properties": {"ActiveState": "failed"}}
+                "kubelet.service": {"status": "collected", "properties": {"LoadState": "loaded", "ActiveState": "failed"}}
             },
         },
     }

@@ -4,6 +4,7 @@ import re
 from datetime import datetime, timezone
 
 from kdiag.rule_catalog import RULE_PACK_VERSION, rule_metadata
+from kdiag.runtime import ACTIVE_SERVICE_STATES, loaded_runtime_service_states, runtime_service_is_active
 
 
 PROBE_PATTERNS = (
@@ -20,6 +21,15 @@ CGROUP_DENIAL_RE = re.compile(
     r"cgroup.*(permission denied|operation not permitted|read-only file system|eacces|eperm|erofs)|"
     r"(permission denied|operation not permitted|read-only file system).*(cgroup|subtree_control|cpu\.|io\.)",
     re.I,
+)
+
+CGROUP_RULE_IDS = frozenset(
+    (
+        "cgroup.controllers_missing",
+        "cgroup.driver_mismatch",
+        "cgroup.service_failure",
+        "security_agent.cgroup_denial",
+    )
 )
 
 
@@ -1369,7 +1379,11 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
     for name, snapshot in node_snapshots.items():
         state = snapshot.get("facts", {}).get("service_states", {}).get("kubelet.service", {})
         properties = state.get("properties", {})
-        if state.get("status") == "collected" and properties.get("ActiveState") not in ("active", "activating"):
+        if (
+            state.get("status") == "collected"
+            and properties.get("LoadState") in (None, "loaded")
+            and properties.get("ActiveState") not in ACTIVE_SERVICE_STATES
+        ):
             kubelet_bad.append(name)
     if kubelet_bad:
         findings.append(
@@ -1389,9 +1403,8 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
     runtime_bad = []
     for name, snapshot in node_snapshots.items():
         states = snapshot.get("facts", {}).get("service_states", {})
-        runtime_states = [states.get(unit, {}) for unit in ("containerd.service", "crio.service")]
-        collected = [state for state in runtime_states if state.get("status") == "collected"]
-        if collected and all(state.get("properties", {}).get("ActiveState") not in ("active", "activating") for state in collected):
+        loaded_runtimes = loaded_runtime_service_states(states)
+        if loaded_runtimes and not any(runtime_service_is_active(state) for state in loaded_runtimes.values()):
             runtime_bad.append(name)
     if runtime_bad:
         findings.append(
@@ -1399,7 +1412,7 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
                 "node.runtime_inactive",
                 "critical",
                 "Container runtime не активен",
-                "Ни один обнаруженный containerd/CRI-O service не находится в active/activating state.",
+                "Ни один загруженный containerd, Deckhouse containerd или CRI-O service не находится в active/activating state.",
                 runtime_bad,
                 ["node-{0}.json.gz#facts.service_states".format(name) for name in runtime_bad],
                 "Проверить runtime journal, CRI socket, cgroup driver и storage; автоматический restart не выполнять.",
@@ -1921,4 +1934,6 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
         )
 
     severity_order = {"critical": 0, "warning": 1, "info": 2}
+    if collection.get("options", {}).get("collect_cgroup", True) is False:
+        findings = [finding for finding in findings if finding.get("rule_id") not in CGROUP_RULE_IDS]
     return sorted(findings, key=lambda item: (severity_order.get(item["severity"], 9), item["rule_id"], item["id"]))

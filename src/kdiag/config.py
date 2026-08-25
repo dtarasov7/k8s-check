@@ -24,6 +24,7 @@ DEFAULT_CONFIG = {
         "pod_log_total_bytes": 8 * MIB,
         "pod_log_max_files": 200,
         "collect_etcd": True,
+        "collect_cgroup": True,
     },
     "ssh": {
         "connect_timeout_seconds": 10,
@@ -81,6 +82,8 @@ def validate_config(config):
         raise ValueError("kubernetes.collect_system_logs must be boolean")
     if not isinstance(config["collection"].get("collect_etcd"), bool):
         raise ValueError("collection.collect_etcd must be boolean")
+    if not isinstance(config["collection"].get("collect_cgroup"), bool):
+        raise ValueError("collection.collect_cgroup must be boolean")
     for key in (
         "since_hours",
         "parallelism",
