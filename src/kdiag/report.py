@@ -4,7 +4,7 @@ from pathlib import Path
 from kdiag.normalize import normalize_evidence
 from kdiag.rule_catalog import RULE_CATALOG, RULE_PACK_VERSION
 from kdiag.rules import evaluate_rules
-from kdiag.util import atomic_write_gzip_json, atomic_write_json, atomic_write_bytes, load_gzip_json, markdown_escape
+from kdiag.util import atomic_write_gzip_json, atomic_write_json, atomic_write_bytes, load_gzip_json, markdown_code, markdown_escape
 
 
 def _safe_member(root, relative):
@@ -126,10 +126,219 @@ def _coverage(collection, nodes, kubernetes):
     return coverage
 
 
-def _rule_ledger(findings, coverage, collect_cgroup):
+RULE_COVERAGE_REQUIREMENTS = {}
+
+
+def _register_rule_requirements(requirements, rule_ids):
+    for rule_id in rule_ids:
+        RULE_COVERAGE_REQUIREMENTS[rule_id] = requirements
+
+
+_register_rule_requirements(
+    ("node",),
+    (
+        "certificate.expiring",
+        "certificate.kubelet_rotation_broken",
+        "cgroup.controllers_missing",
+        "dns.nameserver_limit_exceeded",
+        "inventory.mixed_kernel",
+        "node.kubelet_inactive",
+        "node.low_root_disk",
+        "node.runtime_inactive",
+        "node.swap_active",
+        "time.not_synchronized",
+    ),
+)
+_register_rule_requirements(("node", "node/command/df_inodes"), ("node.low_inodes",))
+_register_rule_requirements(("node", "node/command/df_blocks"), ("node.low_runtime_disk",))
+_register_rule_requirements(
+    ("node", "node/command/runtime_crictl_info"),
+    ("cgroup.driver_mismatch", "runtime.cri_network_not_ready", "runtime.cri_not_ready"),
+)
+_register_rule_requirements(
+    ("node", "node/command/journal_kernel_current"),
+    (
+        "node.conntrack_full",
+        "node.filesystem_error",
+        "node.filesystem_warning",
+        "node.hardware_error",
+        "node.io_error",
+        "node.kernel_oops",
+        "node.task_hung",
+        "node.unregister_netdevice",
+    ),
+)
+_register_rule_requirements(
+    ("node", "node/command/journal_kernel_current", "node/pod_logs", "kubernetes/pods", "kubernetes/logs"),
+    ("node.oom_detected",),
+)
+_register_rule_requirements(
+    ("node", "node/command/installed_packages", "node/command/journal_services_current"),
+    ("security_agent.cgroup_denial",),
+)
+_register_rule_requirements(
+    ("node", "node/command/journal_kernel_current"),
+    ("security_agent.ptrace_alert",),
+)
+_register_rule_requirements(
+    ("node", "node/command/journal_services_current"),
+    ("cgroup.service_failure",),
+)
+_register_rule_requirements(("node", "kubernetes/nodes"), ("inventory.node_set_mismatch",))
+_register_rule_requirements(("kubernetes/pods",), ("inventory.mixed_apiserver_versions",))
+_register_rule_requirements(
+    ("kubernetes/nodes", "kubernetes/pods"),
+    ("inventory.unsupported_version_skew",),
+)
+_register_rule_requirements(
+    ("kubernetes/nodes",),
+    ("kubernetes.network_unavailable", "kubernetes.node_not_ready", "kubernetes.node_pressure"),
+)
+_register_rule_requirements(
+    ("kubernetes/pods",),
+    (
+        "kubernetes.container_exit_nonzero",
+        "kubernetes.init_container_failed",
+        "kubernetes.pod_evicted",
+        "kubernetes.pod_oom_killed",
+        "kubernetes.pod_restart_storm",
+        "kubernetes.pod_waiting",
+    ),
+)
+_register_rule_requirements(
+    ("kubernetes/pods", "kubernetes/events"),
+    ("kubernetes.image_pull_failure", "kubernetes.pod_crash_loop"),
+)
+_register_rule_requirements(("kubernetes/events",), ("kubernetes.failed_scheduling", "storage.volume_operation_failure"))
+_register_rule_requirements(
+    ("kubernetes/events", "kubernetes/logs"),
+    ("kubernetes.probe_failures",),
+)
+_register_rule_requirements(
+    ("kubernetes/workloads",),
+    (
+        "kubernetes.daemonset_misscheduled",
+        "kubernetes.deployment_rollout_failed",
+        "kubernetes.job_failed",
+        "kubernetes.statefulset_rollout_stalled",
+        "kubernetes.workload_degraded",
+    ),
+)
+_register_rule_requirements(
+    ("kubernetes/services", "kubernetes/endpoint_slices"),
+    (
+        "kubernetes.service_no_endpoints",
+        "kubernetes.service_no_ready_endpoints",
+        "kubernetes.service_port_unresolved",
+    ),
+)
+_register_rule_requirements(
+    ("kubernetes/services", "kubernetes/endpoint_slices", "kubernetes/pods"),
+    ("dns.kube_dns_unavailable",),
+)
+_register_rule_requirements(("node", "kubernetes/services"), ("dns.cluster_dns_mismatch",))
+_register_rule_requirements(("kubernetes/coredns_config",), ("dns.coredns_config_empty",))
+_register_rule_requirements(("kubernetes/logs",), ("dns.coredns_errors",))
+_register_rule_requirements(("kubernetes/pdb",), ("pdb.disruption_blocked", "pdb.insufficient_healthy"))
+_register_rule_requirements(("kubernetes/api_readyz",), ("controlplane.api_readyz_failed",))
+_register_rule_requirements(
+    ("node", "node/command/journal_services_current", "node/pod_logs", "kubernetes/logs"),
+    ("controlplane.authentication_config_read_error",),
+)
+_register_rule_requirements(("kubernetes/api_services",), ("controlplane.apiservice_unavailable",))
+_register_rule_requirements(
+    ("kubernetes/nodes", "kubernetes/leases"),
+    ("controlplane.node_lease_stale",),
+)
+_register_rule_requirements(("kubernetes/pods",), ("controlplane.static_pod_unhealthy",))
+_register_rule_requirements(("kubernetes/pvc",), ("storage.pvc_pending",))
+_register_rule_requirements(("kubernetes/pv",), ("storage.pv_failed",))
+_register_rule_requirements(
+    ("kubernetes/pvc", "kubernetes/storage_classes"),
+    ("storage.storage_class_missing",),
+)
+_register_rule_requirements(("kubernetes/volume_attachments",), ("storage.volume_attachment_failed",))
+_register_rule_requirements(
+    ("kubernetes/pv", "kubernetes/csi_drivers", "kubernetes/csi_nodes"),
+    ("storage.csi_driver_registration_gap",),
+)
+_register_rule_requirements(("kubernetes/cilium_endpoints",), ("cilium.endpoint_unhealthy",))
+_register_rule_requirements(("kubernetes/cilium_nodes",), ("cilium.node_ipam_error",))
+_register_rule_requirements(
+    ("kubernetes/cilium_network_policies", "kubernetes/cilium_clusterwide_network_policies"),
+    ("cilium.policy_import_failed",),
+)
+_register_rule_requirements(
+    ("kubernetes/cilium_config", "kubernetes/pods"),
+    ("cilium.kube_proxy_replacement_disabled",),
+)
+_register_rule_requirements(("node", "kubernetes/services"), ("cilium.service_frontend_missing",))
+_register_rule_requirements(
+    ("node", "node/pod_logs", "kubernetes/pods", "kubernetes/logs"),
+    ("cilium.unhealthy",),
+)
+_register_rule_requirements(
+    ("node", "kubernetes/pods"),
+    ("network.ipv6_disabled",),
+)
+_register_rule_requirements(
+    ("node", "node/command/journal_services_current", "node/pod_logs", "kubernetes/events", "kubernetes/logs"),
+    ("network.cni_unavailable",),
+)
+_register_rule_requirements(
+    ("node", "node/command/journal_services_current", "kubernetes/nodes"),
+    ("correlation.node_runtime_failure",),
+)
+_register_rule_requirements(
+    ("node", "node/command/journal_services_current", "node/pod_logs", "kubernetes/nodes", "kubernetes/events", "kubernetes/logs"),
+    ("correlation.node_cni_failure",),
+)
+_register_rule_requirements(
+    ("node", "node/command/journal_kernel_current", "node/pod_logs", "kubernetes/nodes", "kubernetes/pods", "kubernetes/logs"),
+    ("correlation.memory_oom_failure",),
+)
+_register_rule_requirements(
+    ("node", "node/command/journal_services_current", "kubernetes/events", "kubernetes/logs"),
+    ("correlation.certificate_api_failure",),
+)
+_register_rule_requirements(
+    ("node", "node/command/journal_kernel_current", "kubernetes/events", "kubernetes/logs"),
+    ("correlation.conntrack_network_failure",),
+)
+_register_rule_requirements(
+    ("kubernetes/events", "kubernetes/logs"),
+    ("correlation.probe_network_failure",),
+)
+_register_rule_requirements(
+    ("node", "node/command/journal_kernel_current", "node/pod_logs", "kubernetes/nodes", "kubernetes/events", "kubernetes/logs"),
+    ("correlation.storage_failure",),
+)
+_register_rule_requirements(("node",), tuple(rule_id for rule_id in RULE_CATALOG if rule_id.startswith("etcd.")))
+_register_rule_requirements(("prometheus",), tuple(rule_id for rule_id in RULE_CATALOG if rule_id.startswith("prometheus.")))
+
+
+def _requirement_gaps(coverage, requirement):
+    if requirement == "node":
+        matches = [item for item in coverage if item.get("source", "").startswith("node/") and item["source"].count("/") == 1]
+    elif requirement == "node/pod_logs":
+        matches = [item for item in coverage if item.get("source", "").startswith("node/") and item["source"].endswith("/pod_logs")]
+    elif requirement.startswith("node/command/"):
+        command_id = requirement.rsplit("/", 1)[-1]
+        matches = [item for item in coverage if item.get("source", "").startswith("node/") and item["source"].endswith("/command/{0}".format(command_id))]
+    else:
+        matches = [item for item in coverage if item.get("source") == requirement]
+    if not matches:
+        return ["{0}:missing".format(requirement)]
+    return [item["source"] for item in matches if item.get("status") != "collected"]
+
+
+def _rule_ledger(findings, coverage, options):
+    if isinstance(options, bool):
+        options = {"collect_cgroup": options}
+    options = options or {}
+    collect_cgroup = options.get("collect_cgroup", True)
+    collect_etcd = options.get("collect_etcd", False)
     matched = {item.get("rule_id") for item in findings}
-    node_gaps = [item["source"] for item in coverage if item.get("required") and item["source"].startswith("node/") and item.get("status") != "collected"]
-    kube_gaps = [item["source"] for item in coverage if item.get("required") and item["source"].startswith("kubernetes") and item.get("status") != "collected"]
     prometheus_status = next((item.get("status") for item in coverage if item.get("source") == "prometheus"), None)
     ledger = []
     for rule_id in sorted(RULE_CATALOG):
@@ -137,27 +346,27 @@ def _rule_ledger(findings, coverage, collect_cgroup):
         if rule_id in matched:
             status = "matched"
         elif rule_id.startswith("cgroup.") or rule_id == "security_agent.cgroup_denial":
-            status = "not_applicable" if not collect_cgroup else ("unknown" if node_gaps else "not_matched")
-            missing = node_gaps
+            if not collect_cgroup:
+                status = "not_applicable"
+            else:
+                for requirement in RULE_COVERAGE_REQUIREMENTS.get(rule_id, ()):
+                    missing.extend(_requirement_gaps(coverage, requirement))
+                status = "unknown" if missing else "not_matched"
+        elif rule_id.startswith("etcd.") and not collect_etcd:
+            status = "not_applicable"
         elif rule_id.startswith("prometheus."):
             if prometheus_status in (None, "not_configured", "disabled"):
                 status = "not_applicable"
-            elif prometheus_status != "collected":
-                status = "unknown"
-                missing = ["prometheus"]
             else:
-                status = "not_matched"
-        elif rule_id.startswith(("kubernetes.", "dns.", "storage.", "pdb.", "controlplane.", "cilium.")):
-            status = "unknown" if kube_gaps else "not_matched"
-            missing = kube_gaps
-        elif rule_id.startswith("correlation."):
-            missing = node_gaps + kube_gaps
-            status = "unknown" if missing else "not_matched"
+                missing = _requirement_gaps(coverage, "prometheus")
+                status = "unknown" if missing else "not_matched"
         elif rule_id.startswith("collector."):
             status = "not_matched"
         else:
-            status = "unknown" if node_gaps else "not_matched"
-            missing = node_gaps
+            for requirement in RULE_COVERAGE_REQUIREMENTS.get(rule_id, ()):
+                missing.extend(_requirement_gaps(coverage, requirement))
+            missing = sorted(set(missing))
+            status = "unknown" if missing else "not_matched"
         ledger.append(
             {
                 "rule_id": rule_id,
@@ -169,18 +378,39 @@ def _rule_ledger(findings, coverage, collect_cgroup):
     return ledger
 
 
+def _select_unknown_fingerprints(values, limit=20, per_component=5):
+    grouped = {}
+    for item in values:
+        grouped.setdefault(str(item.get("component") or "unknown"), []).append(item)
+    ranked = []
+    for component, items in grouped.items():
+        ordered = sorted(items, key=lambda item: (-int(item.get("count") or 0), str(item.get("fingerprint") or "")))
+        for rank, item in enumerate(ordered[:per_component]):
+            ranked.append((rank, -int(item.get("count") or 0), component, item))
+    selected = [item for _rank, _count, _component, item in sorted(ranked)[:limit]]
+    return selected, max(0, len(values) - len(selected))
+
+
+def _bounded_report_text(value, limit=220):
+    text = " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
 def build_report(collection_dir):
     collection, nodes, kubernetes, prometheus = load_collection(collection_dir)
     normalized = normalize_evidence(collection, nodes, kubernetes)
     findings = evaluate_rules(collection, nodes, kubernetes, normalized, prometheus)
     node_inventory = [_node_row(name, snapshot) for name, snapshot in sorted(nodes.items())]
     coverage = _coverage(collection, nodes, kubernetes)
-    ledger = _rule_ledger(findings, coverage, collection.get("options", {}).get("collect_cgroup", True))
+    ledger = _rule_ledger(findings, coverage, collection.get("options", {}))
     facts = {
         "schema_version": 1,
         "collection_id": collection.get("collection_id"),
         "nodes": node_inventory,
-        "options": {"collect_cgroup": collection.get("options", {}).get("collect_cgroup", True)},
+        "options": {
+            "collect_cgroup": collection.get("options", {}).get("collect_cgroup", True),
+            "collect_etcd": collection.get("options", {}).get("collect_etcd", False),
+        },
         "kubernetes": {
             "status": collection.get("kubernetes", {}).get("status"),
             "sources": {
@@ -242,6 +472,8 @@ def build_report(collection_dir):
         "Статус: **{0}**".format(markdown_escape(report["status"])),
         "",
         "Cgroup checks: **{0}**".format("enabled" if report["options"]["collect_cgroup"] else "disabled"),
+        "",
+        "Etcd checks: **{0}**".format("enabled" if report["options"]["collect_etcd"] else "disabled"),
         "",
         "## Полнота сбора",
         "",
@@ -374,18 +606,29 @@ def build_report(collection_dir):
             "",
         ]
     )
-    unknown = normalized.get("unknown_fingerprints", [])[:20]
+    unknown, unknown_omitted = _select_unknown_fingerprints(normalized.get("unknown_fingerprints", []))
     if unknown:
-        lines.extend(["### Приблизительные heavy hitters неизвестных fingerprints", "", "| Компонент | Estimated count | Max error | Template |", "|---|---:|---:|---|"])
+        lines.extend(
+            [
+                "### Приблизительные heavy hitters неизвестных fingerprints",
+                "",
+                "Это не findings, а частые ещё не классифицированные шаблоны для локального triage. Список сбалансирован по компонентам; полный набор остаётся в `normalized-events.json.gz`.",
+                "",
+            ]
+        )
         for item in unknown:
-            lines.append(
-                "| {0} | {1} | {2} | {3} |".format(
-                    markdown_escape(item.get("component")),
-                    markdown_escape(item.get("count")),
-                    markdown_escape(item.get("estimate_error", 0)),
-                    markdown_escape(item.get("template")),
-                )
+            lines.extend(
+                [
+                    "- {0} — estimated count: {1}; max error: {2}.".format(
+                        markdown_code(item.get("component") or "unknown"),
+                        markdown_escape(item.get("count")),
+                        markdown_escape(item.get("estimate_error", 0)),
+                    ),
+                    "  Template: {0}".format(markdown_code(_bounded_report_text(item.get("template")))),
+                ]
             )
+        if unknown_omitted:
+            lines.append("- В Markdown опущено шаблонов: {0}.".format(unknown_omitted))
         lines.append("")
     correlations = normalized.get("correlations", [])
     if correlations:

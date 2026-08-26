@@ -2,11 +2,52 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kdiag.report import build_report
-from kdiag.util import atomic_write_gzip_json, atomic_write_json
+from kdiag.report import RULE_COVERAGE_REQUIREMENTS, _rule_ledger, _select_unknown_fingerprints, build_report
+from kdiag.rule_catalog import RULE_CATALOG
+from kdiag.util import atomic_write_gzip_json, atomic_write_json, markdown_code, markdown_escape
 
 
 class ReportTest(unittest.TestCase):
+    def test_markdown_uses_readable_angle_brackets_and_balanced_unknowns(self):
+        self.assertEqual(r"\<n\>", markdown_escape("<n>"))
+        self.assertEqual("`<n>`", markdown_code("<n>"))
+        values = [
+            {"component": "kernel", "count": 100 - index, "fingerprint": "k{0}".format(index)}
+            for index in range(10)
+        ] + [
+            {"component": "coredns", "count": 50, "fingerprint": "dns"},
+        ]
+        selected, omitted = _select_unknown_fingerprints(values, limit=20, per_component=5)
+        self.assertEqual(5, sum(item["component"] == "kernel" for item in selected))
+        self.assertEqual(1, sum(item["component"] == "coredns" for item in selected))
+        self.assertEqual(5, omitted)
+
+    def test_non_collector_rules_declare_coverage_requirements(self):
+        expected = {rule_id for rule_id in RULE_CATALOG if not rule_id.startswith("collector.")}
+        self.assertEqual(expected, set(RULE_COVERAGE_REQUIREMENTS))
+
+    def test_rule_ledger_limits_gaps_to_dependent_rules(self):
+        coverage = [
+            {"source": "node/n1", "status": "collected", "required": True},
+            {"source": "node/n1/command/runtime_crictl_info", "status": "unsupported", "required": False},
+            {"source": "node/n1/pod_logs", "status": "truncated", "required": True},
+            {"source": "kubernetes", "status": "partial", "required": True},
+            {"source": "kubernetes/nodes", "status": "collected", "required": True},
+            {"source": "kubernetes/events", "status": "failed", "required": True},
+            {"source": "kubernetes/logs", "status": "partial", "required": True},
+            {"source": "prometheus", "status": "not_configured", "required": False},
+        ]
+        ledger = {
+            item["rule_id"]: item
+            for item in _rule_ledger([], coverage, {"collect_cgroup": True, "collect_etcd": False})
+        }
+        self.assertEqual("not_matched", ledger["node.low_root_disk"]["status"])
+        self.assertEqual("not_matched", ledger["kubernetes.node_not_ready"]["status"])
+        self.assertEqual("unknown", ledger["runtime.cri_not_ready"]["status"])
+        self.assertEqual("unknown", ledger["kubernetes.failed_scheduling"]["status"])
+        self.assertEqual("unknown", ledger["dns.coredns_errors"]["status"])
+        self.assertEqual("not_applicable", ledger["etcd.unhealthy"]["status"])
+
     def test_partial_collection_produces_reports(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -69,8 +110,9 @@ class ReportTest(unittest.TestCase):
             self.assertIn("collector.node_gap", {item["rule_id"] for item in report["findings"]})
             ledger = {item["rule_id"]: item for item in report["rule_evaluation_ledger"]}
             self.assertEqual("matched", ledger["collector.node_gap"]["status"])
-            self.assertEqual("unknown", ledger["kubernetes.node_not_ready"]["status"])
-            self.assertTrue(ledger["kubernetes.node_not_ready"]["missing_evidence"])
+            self.assertEqual("not_matched", ledger["kubernetes.node_not_ready"]["status"])
+            self.assertEqual("unknown", ledger["kubernetes.failed_scheduling"]["status"])
+            self.assertTrue(ledger["kubernetes.failed_scheduling"]["missing_evidence"])
             self.assertFalse(report["options"]["collect_cgroup"])
             self.assertEqual("disabled", report["node_inventory"][0]["cgroup_mode"])
             self.assertIn("Cgroup checks: **disabled**", (root / "report.md").read_text(encoding="utf-8"))

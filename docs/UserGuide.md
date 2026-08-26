@@ -2,7 +2,7 @@
 
 ## 1. Purpose and scope
 
-<code>kdiag 0.7.0</code> creates a one-time emergency snapshot of a Kubernetes cluster and performs deterministic, fully offline analysis. Its current diagnostic compatibility scope is vanilla Kubernetes and Deckhouse CSE Pro 1.74 with Kubernetes 1.24–1.31, up to 20 nodes and about 1,000 Pods. This describes evidence/rule compatibility, not lifecycle support.
+<code>kdiag 0.7.1</code> creates a one-time emergency snapshot of a Kubernetes cluster and performs deterministic, fully offline analysis. Its current diagnostic compatibility scope is vanilla Kubernetes and Deckhouse CSE Pro 1.74 with Kubernetes 1.24–1.31, up to 20 nodes and about 1,000 Pods. This describes evidence/rule compatibility, not lifecycle support.
 
 The program runs on a separate management server. It connects to every node over SSH, runs read-only inspection through non-interactive sudo, and queries the Kubernetes API using a dedicated kubeconfig. Prometheus is optional: the snapshot still works when Prometheus or the entire Kubernetes API is unavailable.
 
@@ -70,6 +70,8 @@ Ansible is used only to resolve inventory and the host name, <code>ansible_host<
 - Passwordless <code>sudo -n</code> to root.
 - Persistent journald and standard inspection tools such as systemctl, journalctl, sysctl, df, ss, and ip.
 - The target allowance is up to 5 GiB free per node; the default temporary node bundle limit is only 32 MiB.
+
+Node commands run with a fixed safe PATH: <code>/opt/deckhouse/bin</code> followed by standard system directories. This discovers Deckhouse-packaged <code>crictl</code>, <code>containerd</code>, and <code>runc</code> without inheriting an arbitrary login PATH. If an optional CLI such as <code>nft</code> or <code>conntrack</code> is absent, its command record is <code>unsupported</code>; this says nothing by itself about nftables or conntrack kernel support.
 
 Temporary node data is removed after a normally completed transfer. Check for leftovers after an interrupted run.
 
@@ -202,6 +204,8 @@ ssh cp01 sudo -n true
 ~~~
 
 Verify every connection profile. Do not place passwords or private keys in the snapshot configuration.
+
+The inventory alias does not have to equal <code>metadata.name</code> of the Kubernetes Node. kdiag compares the alias, collected hostname/FQDN, Node name, and <code>kubernetes.io/hostname</code>. Exact matches take priority; a short-name/FQDN match is used only when it is unambiguous. Ambiguous identities remain unmatched and produce <code>inventory.node_set_mismatch</code> rather than a guessed association.
 
 ## 8. Configuration reference
 
@@ -352,9 +356,11 @@ Each run creates <code>&lt;output&gt;/&lt;collection-id&gt;/</code>:
 | <code>report.md</code> | Primary operator report. |
 | <code>manifest.json</code> | File sizes and SHA-256 hashes. |
 
-Inventory names and Kubernetes Node names may differ; inconsistent hostname configuration reduces correlation quality.
+Inventory aliases and Kubernetes Node names may differ. Unambiguous hostname/FQDN and unique short-name matches are canonicalized to the Kubernetes Node name for Node-scoped correlation; ambiguous identities remain visible as a mismatch.
 
-Coverage is recorded for every node command, node Pod-log group, Kubernetes source, and Kubernetes log entry. A collected parent bundle does not hide an inner `failed`, `timeout`, or `truncated` check. `facts.json`, `findings.json`, and `report.json` include a rule evaluation ledger: `matched`, `not_matched`, `unknown` with missing evidence, or `not_applicable`. Treat `unknown` as an explicit evidence gap, not as a healthy result.
+Coverage is recorded for every node command, node Pod-log group, Kubernetes source, and Kubernetes log entry. A collected parent bundle does not hide an inner `failed`, `timeout`, or `truncated` check. `facts.json`, `findings.json`, and `report.json` include a rule evaluation ledger: `matched`, `not_matched`, `unknown` with missing evidence, or `not_applicable`. Each rule declares its own coverage requirements, so a failed Events query affects event-dependent rules but not a Node-condition rule whose Nodes source was collected. Treat `unknown` as an explicit rule-specific evidence gap, not as a healthy result.
+
+The unknown-fingerprint section in `report.md` is informational rather than a finding. It shows a component-balanced subset of at most five templates per component, limits long templates, and preserves placeholders such as `<n>` and `<ipv6>` in readable code formatting. The complete bounded set remains in `normalized-events.json.gz`.
 
 ~~~bash
 python3.8 dist/kdiag.pyz report /var/lib/kdiag/COLLECTION_ID
@@ -375,7 +381,7 @@ The normalizer handles journald JSON, direct CRI logs, Kubernetes Events, Node c
 
 ## 12. Detailed check catalogue
 
-The artifact contains 96 report rules. Query the exact embedded version with:
+The artifact contains 98 report rules. Query the exact embedded version with:
 
 ~~~bash
 python3.8 dist/kdiag.pyz rules list
@@ -468,9 +474,9 @@ These signatures are adapted from the pinned upstream Node Problem Detector conf
 
 The cluster may intentionally run without kube-proxy. Its absence alone never produces a finding; with Cilium replacement enabled, this is the supported expected state.
 
-### 12.6 cgroup and KESL
+### 12.6 cgroup and security agents
 
-All rules in this subsection are disabled by <code>collection.collect_cgroup=false</code> or the <code>--skip-cgroup</code> CLI flag. Existing collections without the recorded option preserve the previous behavior and keep these checks enabled.
+The <code>cgroup.*</code> rules and <code>security_agent.cgroup_denial</code> are disabled by <code>collection.collect_cgroup=false</code> or <code>--skip-cgroup</code>. The independent ptrace alert remains enabled because it does not derive from cgroup evidence. Existing collections without the recorded option preserve the previous cgroup behavior.
 
 Exact read-only commands for checking one node manually, together with a sanitized result template, are available in the [separate guide](cgroup-manual-checks.md).
 
@@ -480,6 +486,7 @@ Exact read-only commands for checking one node manually, together with a sanitiz
 | <code>cgroup.driver_mismatch</code> | fact | Explicit kubelet and runtime cgroup driver values differ. | Align through the approved platform change procedure. |
 | <code>cgroup.service_failure</code> | correlation | cgroup denial/failure and kubelet/runtime failure on same node within 15 minutes. | Order the timeline and inspect kernel/security audit evidence. |
 | <code>security_agent.cgroup_denial</code> | correlation | KESL detected plus cgroup denial/failure in same node scope. | Record exact KESL build, kernel and denied operation; verify vendor policy/compatibility. It is not proof of cause. |
+| <code>security_agent.ptrace_alert</code> | fact | Kernel/security-agent journal contains a ptrace attack message with the two involved processes. | Record both programs/PIDs and adjacent audit/KESL events; do not infer malicious intent or Kubernetes impact from the message alone. |
 
 ### 12.7 Service, EndpointSlice, and DNS
 
@@ -499,6 +506,7 @@ Exact read-only commands for checking one node manually, together with a sanitiz
 | Rule | Type | What is checked | Safe first response |
 |---|---|---|---|
 | <code>controlplane.api_readyz_failed</code> | fact | Retrieved readyz verbose output contains failed named checks or endpoint failure. | Use the failed subcheck to select apiserver/dependency evidence. |
+| <code>controlplane.authentication_config_read_error</code> | fact | kube-apiserver reports that its configured authentication file cannot be read. | Check the effective flag, mount/path, permissions, and Deckhouse reconciliation window; do not create an empty replacement file. |
 | <code>controlplane.apiservice_unavailable</code> | fact | Aggregated APIService Available=False or Unknown. | Inspect reason, backing Service/endpoints, TLS and extension server. |
 | <code>controlplane.node_lease_stale</code> | correlation | Node Lease absent or older than newest peer by max(120 s, 3 x leaseDurationSeconds). | Compare kubelet, API reachability, and clock; account for global API freeze. |
 | <code>controlplane.static_pod_unhealthy</code> | fact | Collected etcd/apiserver/scheduler/controller-manager mirror Pod absent or unhealthy. | Map to control-plane node and inspect static manifest, kubelet, container, dependencies. |
@@ -549,6 +557,7 @@ Exact read-only commands for checking one node manually, together with a sanitiz
 ## 13. Collector troubleshooting
 
 - **SSH fails:** verify the inventory-resolved host, OpenSSH config, host key, user/port, sudo -n, and remote Python. A working Ansible playbook is not sufficient because kdiag uses OpenSSH after inventory resolution.
+- **A node utility is unsupported:** inspect the recorded command name. Deckhouse tools are searched in <code>/opt/deckhouse/bin</code>; an absent <code>nft</code> or <code>conntrack</code> executable is a missing userspace client, not proof that the kernel subsystem is absent.
 - **Kubernetes Forbidden:** run auth can-i with the same kubeconfig/context and add only the missing read permission. Missing Cilium CRDs or CSIStorageCapacity can be valid; an RBAC denial is different from object absence.
 - **readyz missing:** distinguish API/TLS/auth failure from missing non-resource URL permission. Absence is not the same as a failed internal readyz check.
 - **etcd evidence missing:** verify the option, stacked topology, standard paths, etcdctl/crictl, container state, and sudo. Never copy a private key merely to suppress the finding.

@@ -40,6 +40,7 @@ class NodeSmokeTest(unittest.TestCase):
         self.assertEqual({"status": "disabled"}, snapshot["facts"]["cgroup"])
         self.assertEqual({"status": "disabled"}, snapshot["facts"]["process_cgroups"])
         self.assertFalse(snapshot["options"]["collect_cgroup"])
+        self.assertFalse(snapshot["options"]["collect_etcd"])
 
 
 if __name__ == "__main__":

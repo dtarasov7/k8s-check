@@ -213,7 +213,10 @@ def run_snapshot(inventory_path, group, output_root, config, progress=None):
         "started_at": started_at,
         "ended_at": utc_now(),
         "inventory": {"path": str(Path(inventory_path).resolve()), "group": group, "host_count": len(hosts)},
-        "options": {"collect_cgroup": config["collection"]["collect_cgroup"]},
+        "options": {
+            "collect_cgroup": config["collection"]["collect_cgroup"],
+            "collect_etcd": config["collection"]["collect_etcd"],
+        },
         "limits": {
             "max_node_bundle_bytes": config["collection"]["max_node_bundle_bytes"],
             "central_reserve_bytes": config["collection"]["central_reserve_bytes"],

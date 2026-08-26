@@ -9,7 +9,7 @@
 - запуск node collector через `ssh` и `sudo -n`;
 - продолжение сбора при недоступном узле, API или Prometheus;
 - node evidence: OS/kernel/boot/packages, systemd/kubelet, CRI inventory/readiness, journals, сеть/sysctl, cgroup, PSI/resources, config hashes, certificate rotation metadata, read-only stacked-etcd status/capacity и bounded CRI logs;
-- определение активного runtime для vanilla `containerd.service`, `crio.service` и Deckhouse `containerd-deckhouse.service`; отсутствующие и неиспользуемые альтернативные units не считаются отказом;
+- определение активного runtime для vanilla `containerd.service`, `crio.service` и Deckhouse `containerd-deckhouse.service`; детерминированный node `PATH` включает `/opt/deckhouse/bin`, отсутствующие и неиспользуемые альтернативные units не считаются отказом;
 - allowlist-проекция Nodes, Pods, Events, workloads, Services, EndpointSlices, APIService, Lease, PDB/PV/PVC/CSI, NetworkPolicy и диагностических Cilium CRD;
 - API server `/readyz?verbose` и параллельный bounded Kubernetes collection тремя read-only запросами;
 - bounded current/previous logs только системных и явно разрешённых namespace;
@@ -17,7 +17,7 @@
 - автономный rule pack для Node Problem Detector signatures, Pod lifecycle/rollouts/PDB, Service/CoreDNS/EndpointSlice, Prometheus, control-plane/etcd capacity, storage/CSI, runtime/Cilium, version skew, ресурсов, времени и сертификатов;
 - диагностика Cilium в режиме без kube-proxy по effective replacement setting и read-only service maps на узлах; само отсутствие kube-proxy не считается ошибкой;
 - разделение выводов на `fact`, `correlation` и `hypothesis`, нормализованные events и fingerprints неизвестных сообщений;
-- coverage по каждой node command, Pod log и Kubernetes source, а также ledger выполнения правил со статусами `matched`, `not_matched`, `unknown`, `not_applicable`;
+- coverage по каждой node command, Pod log и Kubernetes source, а также dependency-aware ledger выполнения правил со статусами `matched`, `not_matched`, `unknown`, `not_applicable`;
 - evidence cards с bounded excerpts, counter-evidence, missing checks, окнами сбора/корреляции и correlation timeline;
 - необязательные минимизированные пакеты для локальной LLM с выбранными evidence fragments и fail-closed псевдонимизированные пакеты для ручной работы с внешней LLM.
 
@@ -62,7 +62,7 @@ kubectl --kubeconfig /path/to/kdiag-readonly.kubeconfig auth can-i get secrets -
 
 - Python 3.8 по известному абсолютному пути, по умолчанию `/usr/bin/python3.8`;
 - неинтерактивный `sudo -n` до root для текущей SSH-учётки;
-- штатные системные утилиты. Отсутствующая утилита отмечается как `unsupported`, а не ломает snapshot.
+- штатные системные утилиты. Фиксированный безопасный `PATH` сначала проверяет `/opt/deckhouse/bin`, затем стандартные системные каталоги. Отсутствующая утилита отображается как недоступная команда со статусом `unsupported`; это не означает отсутствие одноимённой подсистемы ядра или файла данных.
 
 На control-plane узлах `collect_etcd=true` использует host `etcdctl` либо `crictl exec` в уже работающий static Pod etcd. Выполняются только `endpoint status`, `endpoint health` и `alarm list` со стандартными kubeadm healthcheck TLS paths. Содержимое private key не читается и не попадает в bundle. Для external/non-kubeadm etcd источник будет `not_applicable` или `unavailable`.
 
@@ -112,6 +112,8 @@ python3.8 dist/kdiag.pyz snapshot \
 
 Из inventory используются только имя узла, `ansible_host`, `ansible_user` и `ansible_port`. Ключ текущей учётной записи должен быть доступен обычному `ssh` через стандартный путь, `ssh-agent` или проверенный OpenSSH config; `ansible_ssh_private_key_file` не переносится в команду.
 
+При анализе inventory alias сопоставляется с Kubernetes Node по собранным hostname/FQDN, имени Node и label `kubernetes.io/hostname`. Однозначное совпадение короткого имени допускается; неоднозначные short names остаются несопоставленными и попадают в отчёт без угадывания.
+
 ## Результат
 
 Каждый запуск создаёт отдельный каталог:
@@ -130,7 +132,7 @@ python3.8 dist/kdiag.pyz snapshot \
   manifest.json
 ```
 
-`report.md` начинается с coverage matrix. Недоступные, failed, timeout и truncated внутренние checks отображаются явно даже при collected parent bundle. Ledger правил отличает чистый `not_matched` от `unknown` из-за отсутствующего evidence и от `not_applicable`. Повторно построить derived-отчёт можно командой:
+`report.md` начинается с coverage matrix. Недоступные, failed, timeout и truncated внутренние checks отображаются явно даже при collected parent bundle. Ledger правил отличает чистый `not_matched` от `unknown` из-за evidence, необходимого именно этому правилу, и от `not_applicable`; несвязанный gap одного журнала/source больше не обнуляет всю группу правил. Повторно построить derived-отчёт можно командой:
 
 ```bash
 python3.8 dist/kdiag.pyz report /var/lib/kdiag/<collection-id>
@@ -154,7 +156,9 @@ python3.8 dist/kdiag.pyz rules list
 python3.8 dist/kdiag.pyz rules explain kubernetes.node_not_ready
 ```
 
-`normalized-events.json.gz` содержит дедуплицированные категоризированные события, независимые scoped correlation episodes, явные counters усечения/отбрасывания по источникам и bounded approximate heavy hitters неизвестных fingerprints. Исходные сообщения остаются confidential evidence; передавать этот файл за пределы контура без отдельного обезличивания нельзя.
+`normalized-events.json.gz` содержит дедуплицированные категоризированные события, независимые scoped correlation episodes, явные counters усечения/отбрасывания по источникам и bounded approximate heavy hitters неизвестных fingerprints. Markdown-отчёт показывает сбалансированное по компонентам подмножество как компактные code-formatted templates; placeholders вида `<n>` остаются читаемыми. Исходные сообщения остаются confidential evidence; передавать этот файл за пределы контура без отдельного обезличивания нельзя.
+
+Kubernetes API audit logs, включая Deckhouse-specific audit backends, не собираются. Они не доступны через единый переносимый read-only Kubernetes API, могут содержать чувствительные request/response data и иметь большой объём. Безопасное добавление требует отдельного opt-in, зависящих от deployment путей/backends, жёстких лимитов по времени и объёму, а также отдельной редакции; поэтому их отсутствие в snapshot намеренно и не считается coverage error.
 
 Коды завершения snapshot:
 

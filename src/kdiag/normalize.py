@@ -5,6 +5,7 @@ from collections import Counter, deque
 from datetime import datetime, timezone
 
 from kdiag.npd_rules import NPD_CATEGORY_PATTERNS
+from kdiag.node_identity import match_node_identities
 from kdiag.runtime import ACTIVE_SERVICE_STATES, RUNTIME_SERVICE_UNITS, loaded_runtime_service_states, runtime_service_is_active
 
 
@@ -40,6 +41,8 @@ CATEGORY_PATTERNS = (
     ("dns_forward_loop", re.compile(r"plugin/loop|loop detected|forwarding loop", re.I)),
     ("dns_upstream_failure", re.compile(r"coredns.*(?:upstream|forward).*(?:timeout|unreachable|refused)|plugin/errors.*(?:timeout|refused|unreachable)", re.I)),
     ("selinux_denial", re.compile(r"avc:\s+denied|selinux.*denied", re.I)),
+    ("authentication_config_read_error", re.compile(r"(?:failed|unable) to read authentication config file.*(?:no such file|permission denied|is a directory)", re.I)),
+    ("ptrace_security_alert", re.compile(r"ptrace attack of .{1,512} was attempted by", re.I)),
 )
 
 
@@ -104,6 +107,8 @@ CATEGORY_SEVERITY = {
     "npd_hardware_corrected": "warning",
     "npd_hardware_recoverable": "critical",
     "npd_hardware_fatal": "critical",
+    "authentication_config_read_error": "warning",
+    "ptrace_security_alert": "warning",
 }
 
 
@@ -185,6 +190,11 @@ def classify_message(message, reason=None, source=None, component=None):
     dns_context = source is None or bool(DNS_COMPONENT_RE.search(component_name))
     if not dns_context:
         categories.difference_update(("dns_servfail", "dns_forward_loop", "dns_upstream_failure"))
+    api_server_context = source is None or "apiserver" in component_name.lower()
+    if not api_server_context:
+        categories.discard("authentication_config_read_error")
+    if not kernel_context:
+        categories.discard("ptrace_security_alert")
     # A cgroup-specific EROFS is not evidence that the backing filesystem is
     # generally read-only. Keeping both labels caused false storage failures.
     if "cgroup_access_denied" in categories:
@@ -317,7 +327,7 @@ def _append(events, unknown, stats, event):
     events.append(event)
 
 
-def _normalize_journals(node_name, snapshot, events, unknown, stats):
+def _normalize_journals(node_name, snapshot, events, unknown, stats, evidence_name=None):
     journal_ids = (
         "journal_services_current",
         "journal_services_previous",
@@ -340,7 +350,7 @@ def _normalize_journals(node_name, snapshot, events, unknown, stats):
             reason = record.get("SYSLOG_IDENTIFIER")
             component = record.get("_SYSTEMD_UNIT") or record.get("SYSLOG_IDENTIFIER") or command_id
             categories = classify_message(message, reason, source="journal", component=component)
-            evidence = "node-{0}.json.gz#commands.{1}:line-{2}".format(node_name, command_id, line_number)
+            evidence = "node-{0}.json.gz#commands.{1}:line-{2}".format(evidence_name or node_name, command_id, line_number)
             _append(
                 events,
                 unknown,
@@ -359,7 +369,7 @@ def _normalize_journals(node_name, snapshot, events, unknown, stats):
             )
 
 
-def _normalize_node_pod_logs(node_name, snapshot, events, unknown, stats):
+def _normalize_node_pod_logs(node_name, snapshot, events, unknown, stats, evidence_name=None):
     fallback = snapshot.get("ended_at")
     for entry_index, entry in enumerate(snapshot.get("pod_logs", {}).get("entries", [])):
         for line_number, line in enumerate(entry.get("text", "").splitlines(), 1):
@@ -370,7 +380,7 @@ def _normalize_node_pod_logs(node_name, snapshot, events, unknown, stats):
             else:
                 timestamp, message, inferred = fallback, line, True
             categories = classify_message(message, source="cri_log", component=entry.get("container"))
-            evidence = "node-{0}.json.gz#pod_logs.entries[{1}]:line-{2}".format(node_name, entry_index, line_number)
+            evidence = "node-{0}.json.gz#pod_logs.entries[{1}]:line-{2}".format(evidence_name or node_name, entry_index, line_number)
             _append(
                 events,
                 unknown,
@@ -600,7 +610,7 @@ def _normalize_kubernetes_logs(kubernetes, events, unknown, stats, pod_nodes):
             )
 
 
-def _normalize_service_states(node_name, snapshot, events, stats):
+def _normalize_service_states(node_name, snapshot, events, stats, evidence_name=None):
     timestamp = snapshot.get("ended_at")
     service_states = snapshot.get("facts", {}).get("service_states", {})
     loaded_runtimes = loaded_runtime_service_states(service_states)
@@ -634,7 +644,7 @@ def _normalize_service_states(node_name, snapshot, events, stats):
                 "systemd_state",
                 message,
                 categories,
-                "node-{0}.json.gz#facts.service_states.{1}".format(node_name, unit),
+                "node-{0}.json.gz#facts.service_states.{1}".format(evidence_name or node_name, unit),
                 timestamp=timestamp,
                 node=node_name,
                 component=unit,
@@ -796,10 +806,13 @@ def normalize_evidence(collection, node_snapshots, kubernetes):
         "dropped_by_source": Counter(),
         "truncated": False,
     }
-    for node_name, snapshot in sorted(node_snapshots.items()):
-        _normalize_journals(node_name, snapshot, events, unknown, stats)
-        _normalize_node_pod_logs(node_name, snapshot, events, unknown, stats)
-        _normalize_service_states(node_name, snapshot, events, stats)
+    kubernetes_nodes = kubernetes.get("sources", {}).get("nodes", {}).get("data", {}).get("items", []) or []
+    node_identity_map = match_node_identities(node_snapshots, kubernetes_nodes)
+    for inventory_name, snapshot in sorted(node_snapshots.items()):
+        node_name = node_identity_map.get(inventory_name, inventory_name)
+        _normalize_journals(node_name, snapshot, events, unknown, stats, evidence_name=inventory_name)
+        _normalize_node_pod_logs(node_name, snapshot, events, unknown, stats, evidence_name=inventory_name)
+        _normalize_service_states(node_name, snapshot, events, stats, evidence_name=inventory_name)
     pod_nodes = _pod_node_index(kubernetes)
     _normalize_kubernetes_events(kubernetes, events, unknown, stats, pod_nodes)
     _normalize_node_conditions(kubernetes, events, stats)

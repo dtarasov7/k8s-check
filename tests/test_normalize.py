@@ -33,6 +33,24 @@ class NormalizeTest(unittest.TestCase):
             "dns_servfail",
             classify_message("request returned SERVFAIL", source="kubernetes_pod_log", component="coredns"),
         )
+        auth_message = 'Failed to read authentication config file: open /etc/kubernetes/auth.yaml: no such file or directory'
+        self.assertIn(
+            "authentication_config_read_error",
+            classify_message(auth_message, source="kubernetes_pod_log", component="kube-apiserver"),
+        )
+        self.assertNotIn(
+            "authentication_config_read_error",
+            classify_message(auth_message, source="kubernetes_pod_log", component="application"),
+        )
+        ptrace_message = 'ptrace attack of "/opt/vendor/agent" (42) was attempted by "/opt/security/agent" (7)'
+        self.assertIn(
+            "ptrace_security_alert",
+            classify_message(ptrace_message, source="journal", component="kernel"),
+        )
+        self.assertNotIn(
+            "ptrace_security_alert",
+            classify_message(ptrace_message, source="kubernetes_pod_log", component="application"),
+        )
 
     def test_pinned_npd_signatures_are_classified(self):
         cases = {
@@ -91,6 +109,27 @@ class NormalizeTest(unittest.TestCase):
         self.assertEqual(1, normalized["stats"]["malformed_records"])
         self.assertEqual(1, normalized["stats"]["unknown_retained_fingerprints"])
         self.assertEqual(1, normalized["unknown_fingerprints"][0]["count"])
+
+    def test_short_inventory_name_correlates_with_kubernetes_fqdn(self):
+        journal = (FIXTURES / "journal-synthetic.jsonl").read_text(encoding="utf-8")
+        kubernetes = json.loads((FIXTURES / "kubernetes-synthetic.json").read_text(encoding="utf-8"))
+        kubernetes["sources"]["nodes"]["data"]["items"][0]["metadata"]["name"] = "node-1.example.test"
+        for pod in kubernetes["sources"]["pods"]["data"]["items"]:
+            pod["spec"]["nodeName"] = "node-1.example.test"
+        nodes = {
+            "node-1": {
+                "host": {"hostname": "node-1", "fqdn": "node-1.example.test"},
+                "ended_at": "2026-01-01T00:10:00Z",
+                "commands": [{"id": "journal_services_current", "stdout": journal}],
+                "pod_logs": {"entries": []},
+                "facts": {"service_states": {}},
+            }
+        }
+        normalized = normalize_evidence({"collection_id": "fqdn"}, nodes, kubernetes)
+        correlation_ids = {item["correlation_id"] for item in normalized["correlations"]}
+        self.assertIn("node_runtime_failure", correlation_ids)
+        node_scopes = {item["scope"] for item in normalized["correlations"] if item["scope"].startswith("node:")}
+        self.assertIn("node:node-1.example.test", node_scopes)
 
     def test_unknown_fingerprint_memory_is_bounded(self):
         def token(index):

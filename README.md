@@ -9,7 +9,7 @@
 - node collector execution over `ssh` and `sudo -n`;
 - best-effort collection when a node, the API, or Prometheus is unavailable;
 - node evidence covering the OS, kernel, boot, packages, systemd, kubelet, CRI inventory/readiness, journals, network, sysctl, cgroups, PSI/resources, configuration hashes, certificate rotation metadata, read-only stacked-etcd status/capacity, and bounded CRI logs;
-- active-runtime detection for vanilla `containerd.service`, `crio.service`, and Deckhouse `containerd-deckhouse.service`; missing and unused alternative units are not treated as failures;
+- active-runtime detection for vanilla `containerd.service`, `crio.service`, and Deckhouse `containerd-deckhouse.service`; the deterministic node `PATH` includes `/opt/deckhouse/bin`, and missing or unused alternative units are not treated as failures;
 - allowlist projections of Nodes, Pods, Events, workloads, Services, EndpointSlices, APIService, Lease, PDB/PV/PVC/CSI, NetworkPolicy, and diagnostic Cilium CRDs;
 - API server `/readyz?verbose` and bounded parallel Kubernetes collection with three read-only requests;
 - bounded current and previous logs from system namespaces and explicitly approved application namespaces only;
@@ -17,7 +17,7 @@
 - an autonomous rule pack for Node Problem Detector signatures, Pod lifecycle/rollouts/PDB, Service/CoreDNS/EndpointSlice, Prometheus, control-plane/etcd capacity, storage/CSI, runtime/Cilium, version skew, resources, time, and certificates;
 - kube-proxy-free Cilium diagnostics based on the effective replacement setting and read-only per-node Cilium service maps; absence of kube-proxy alone is not an error;
 - findings classified as `fact`, `correlation`, or `hypothesis`, normalized events, and fingerprints for unknown messages;
-- per-command, per-Pod-log, and per-Kubernetes-source coverage plus a rule evaluation ledger with `matched`, `not_matched`, `unknown`, and `not_applicable` states;
+- per-command, per-Pod-log, and per-Kubernetes-source coverage plus a dependency-aware rule evaluation ledger with `matched`, `not_matched`, `unknown`, and `not_applicable` states;
 - evidence cards with bounded excerpts, counter-evidence, missing checks, collection/correlation windows, and a correlation timeline;
 - optional minimized local LLM packages with selected evidence fragments and fail-closed pseudonymized packages for a manually operated external LLM.
 
@@ -62,7 +62,7 @@ On cluster nodes:
 
 - Python 3.8 at a known absolute path, `/usr/bin/python3.8` by default;
 - non-interactive root access through `sudo -n` for the current SSH account;
-- standard system utilities. A missing utility is reported as `unsupported` and does not abort the snapshot.
+- standard system utilities. The fixed safe `PATH` includes `/opt/deckhouse/bin` before standard system directories. A missing utility is reported as an unavailable command with status `unsupported` and does not imply that a similarly named kernel subsystem or data file is absent.
 
 On control-plane nodes, `collect_etcd=true` uses either a host `etcdctl` or `crictl exec` in the existing static etcd Pod. It runs only `endpoint status`, `endpoint health`, and `alarm list` with standard kubeadm health-check TLS paths. Private-key contents are never read into the bundle. External or non-kubeadm etcd is reported as `not_applicable` or `unavailable`.
 
@@ -112,6 +112,8 @@ Useful options:
 
 Only the inventory host name, `ansible_host`, `ansible_user`, and `ansible_port` are used. The current account's key must be available to normal `ssh` through its standard location, `ssh-agent`, or a reviewed OpenSSH configuration. `ansible_ssh_private_key_file` is not copied into the command.
 
+For analysis, an inventory alias is matched to a Kubernetes Node using the collected hostname/FQDN, Node name, and `kubernetes.io/hostname`. A unique short-name match is accepted; ambiguous short names remain unmatched and are reported instead of being guessed.
+
 ## Output
 
 Every run creates a separate directory:
@@ -130,7 +132,7 @@ Every run creates a separate directory:
   manifest.json
 ```
 
-`report.md` starts with a coverage matrix and explicitly shows unavailable, failed, timed-out, and truncated inner checks even when their parent bundle was collected. The rule ledger distinguishes a clean non-match from `unknown` caused by missing evidence and from `not_applicable`. Rebuild derived output with:
+`report.md` starts with a coverage matrix and explicitly shows unavailable, failed, timed-out, and truncated inner checks even when their parent bundle was collected. The rule ledger distinguishes a clean non-match from `unknown` caused by evidence required by that specific rule and from `not_applicable`; an unrelated log/source gap does not invalidate every rule in the same broad component group. Rebuild derived output with:
 
 ```bash
 python3.8 dist/kdiag.pyz report /var/lib/kdiag/<collection-id>
@@ -154,7 +156,9 @@ python3.8 dist/kdiag.pyz rules list
 python3.8 dist/kdiag.pyz rules explain kubernetes.node_not_ready
 ```
 
-`normalized-events.json.gz` contains deduplicated categorized events, independent scoped correlation episodes, explicit truncation/drop counters by source, and bounded approximate heavy hitters for unknown fingerprints. Original messages remain confidential evidence; do not transfer this file outside the trusted environment without a separate redaction review.
+`normalized-events.json.gz` contains deduplicated categorized events, independent scoped correlation episodes, explicit truncation/drop counters by source, and bounded approximate heavy hitters for unknown fingerprints. The Markdown report shows a component-balanced subset as compact code-formatted templates; placeholders such as `<n>` remain readable. Original messages remain confidential evidence; do not transfer this file outside the trusted environment without a separate redaction review.
+
+Kubernetes API audit logs are not collected, including Deckhouse-specific audit backends. They are not exposed through a portable read-only Kubernetes API, may contain sensitive request or response data, and can be very large. Adding them safely requires a separate explicit opt-in with deployment-specific paths/backends, strict byte and time limits, and dedicated redaction; their absence from the snapshot is therefore intentional rather than a coverage error.
 
 Snapshot exit codes:
 

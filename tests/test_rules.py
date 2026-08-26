@@ -100,6 +100,58 @@ class RulesTest(unittest.TestCase):
         self.assertIn("inventory.mixed_kernel", rule_ids)
         self.assertIn("network.ipv6_disabled", rule_ids)
 
+    def test_inventory_alias_matches_kubernetes_node_fqdn(self):
+        snapshot = node_snapshot("6.1")
+        snapshot["host"].update({"hostname": "node-1", "fqdn": "node-1.example.test"})
+        kubernetes = {
+            "sources": {
+                "nodes": {
+                    "status": "collected",
+                    "data": {"items": [{"metadata": {"name": "node-1.example.test"}, "status": {"conditions": []}}]},
+                }
+            }
+        }
+        collection = {"nodes": [{"host": "node-1", "status": "collected"}]}
+        rule_ids = {item["rule_id"] for item in evaluate_rules(collection, {"node-1": snapshot}, kubernetes)}
+        self.assertNotIn("inventory.node_set_mismatch", rule_ids)
+
+    def test_controlplane_auth_config_and_ptrace_alerts_are_findings(self):
+        normalized = {
+            "events": [
+                {
+                    "event_id": "auth",
+                    "categories": ["authentication_config_read_error"],
+                    "source": "kubernetes_pod_log",
+                    "component": "kube-apiserver",
+                    "evidence": "kubernetes.json.gz#logs.entries[0]",
+                    "message_excerpt": "Failed to read authentication config file: no such file or directory",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                },
+                {
+                    "event_id": "ptrace",
+                    "categories": ["ptrace_security_alert"],
+                    "source": "journal",
+                    "component": "kernel",
+                    "node": "node-1",
+                    "evidence": "node-node-1.json.gz#commands.journal_kernel_current:line-1",
+                    "message_excerpt": "ptrace attack of vendor agent was attempted by security agent",
+                    "timestamp": "2026-01-01T00:01:00Z",
+                },
+            ],
+            "correlations": [],
+        }
+        rule_ids = {
+            item["rule_id"]
+            for item in evaluate_rules(
+                {"nodes": []},
+                {},
+                {},
+                normalized,
+            )
+        }
+        self.assertIn("controlplane.authentication_config_read_error", rule_ids)
+        self.assertIn("security_agent.ptrace_alert", rule_ids)
+
     def test_runtime_service_detection_supports_deckhouse_and_ignores_not_found(self):
         snapshot = node_snapshot("6.1")
         snapshot["facts"]["service_states"].update(

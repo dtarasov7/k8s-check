@@ -6,6 +6,25 @@
 
 ## [Не выпущено]
 
+## [0.7.1] - 2026-08-26
+
+### Добавлено
+
+- Добавлены осторожные fact-findings для повторяющихся ошибок чтения authentication config у kube-apiserver и kernel/security-agent ptrace alerts. Оба сохраняют bounded excerpts и явно не утверждают недоступность API, вредоносность или причинность без дополнительных evidence.
+
+### Исправлено
+
+- В детерминированный безопасный `PATH` сборщика добавлен Deckhouse-каталог `/opt/deckhouse/bin`, поэтому поставляемые с Deckhouse `crictl`, `containerd` и `runc` находятся без наследования неконтролируемого login environment.
+- Отсутствующие исполняемые файлы, включая необязательные клиенты `nft` и `conntrack`, теперь отображаются как недоступные команды вместо вводящего в заблуждение сообщения Python «No such file or directory».
+- Статус `unknown` в ledger теперь вычисляется по объявленным зависимостям evidence каждого правила. Усечение Pod logs или отказ одного Kubernetes source больше не переводит несвязанные Node, Kubernetes, DNS, storage и Cilium правила в `unknown`.
+- Inventory aliases, собранные hostname/FQDN, имена Kubernetes Node и label `kubernetes.io/hostname` сопоставляются по однозначному exact или short name. Это устраняет ложные inventory mismatch и восстанавливает Node-scoped correlations, когда inventory использует короткие имена, а Kubernetes — FQDN.
+- Выбранный режим сбора etcd теперь сохраняется в метаданных node/collection/report, поэтому отключённые etcd-правила получают `not_applicable`, а не `unknown` или `not_matched`.
+- Heavy hitters неизвестных fingerprints теперь выводятся компактным сбалансированным по компонентам списком с bounded templates в code formatting. Angle-bracket placeholders отображаются как читаемые `<n>`, `<ipv6>` и подобные токены вместо буквальных HTML entities.
+
+### Документация
+
+- Зафиксировано, что Kubernetes API audit logs, включая Deckhouse-specific backends, намеренно не собираются до появления отдельного bounded и redacted режима с явным opt-in.
+
 ## [0.7.0] - 2026-08-26
 
 ### Добавлено

@@ -6,6 +6,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-26
+
+### Added
+
+- Added cautious fact findings for repeated kube-apiserver authentication-config read failures and kernel/security-agent ptrace alerts. Both retain bounded excerpts and explicitly avoid claiming API impact, malicious intent, or causality without additional evidence.
+
+### Fixed
+
+- Added Deckhouse `/opt/deckhouse/bin` to the collector's deterministic safe `PATH`, allowing the packaged `crictl`, `containerd`, and `runc` binaries to be discovered without inheriting an uncontrolled login environment.
+- Missing executables such as optional `nft` and `conntrack` clients are now reported as unavailable commands instead of exposing Python's misleading “No such file or directory” wording.
+- Rule-ledger `unknown` status is now calculated from each rule's declared evidence dependencies. Truncated Pod logs or one failed Kubernetes source no longer make unrelated Node, Kubernetes, DNS, storage, or Cilium rules unknown.
+- Inventory aliases, collected hostname/FQDN values, Kubernetes Node names, and the `kubernetes.io/hostname` label are matched using unambiguous exact or short-name identities. This removes false inventory mismatches and restores Node-scoped correlations when inventory uses short names and Kubernetes uses FQDNs.
+- The selected etcd collection mode is now retained in node/collection/report metadata so disabled etcd rules are represented as `not_applicable` rather than `unknown` or `not_matched`.
+- Unknown-fingerprint heavy hitters are now shown as a compact component-balanced list with bounded code-formatted templates. Angle-bracket placeholders render as readable `<n>`, `<ipv6>`, and similar tokens instead of literal HTML entities.
+
+### Documentation
+
+- Documented that Kubernetes API audit logs, including Deckhouse-specific backends, remain intentionally out of scope until an explicit bounded and redacted collection mode is designed.
+
 ## [0.7.0] - 2026-08-26
 
 ### Added

@@ -116,4 +116,12 @@ def load_gzip_json(path, max_bytes=128 * 1024 * 1024):
 
 def markdown_escape(value):
     text = " ".join(str(value).replace("\r", " ").replace("\n", " ").split())
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("`", "\\`").replace("<", "&lt;").replace(">", "&gt;")
+    return text.replace("\\", "\\\\").replace("|", "\\|").replace("`", "\\`").replace("<", "\\<").replace(">", "\\>")
+
+
+def markdown_code(value):
+    text = " ".join(str(value).replace("\r", " ").replace("\n", " ").split())
+    runs = [len(value) for value in re.findall(r"`+", text)]
+    fence = "`" * (max(runs or [0]) + 1)
+    padding = " " if text.startswith("`") or text.endswith("`") else ""
+    return "{0}{1}{2}{1}{0}".format(fence, padding, text)

@@ -1,4 +1,4 @@
-RULE_PACK_VERSION = "2026.08.7"
+RULE_PACK_VERSION = "2026.08.8"
 
 
 SOURCES = {
@@ -21,6 +21,7 @@ SOURCES = {
     "k8s_services": "https://kubernetes.io/docs/tasks/debug/debug-application/debug-service/",
     "k8s_dns": "https://kubernetes.io/docs/tasks/administer-cluster/dns-debugging-resolution/",
     "k8s_api_health": "https://kubernetes.io/docs/reference/using-api/health-checks/",
+    "k8s_auth_config": "https://kubernetes.io/docs/reference/access-authn-authz/authentication-config/",
     "k8s_apiservice": "https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/apiserver-aggregation/",
     "k8s_leases": "https://kubernetes.io/docs/concepts/architecture/leases/",
     "k8s_storage": "https://kubernetes.io/docs/concepts/storage/",
@@ -82,6 +83,7 @@ RULE_CATALOG = {
     "dns.kube_dns_unavailable": _entry("Cluster DNS недоступен", "fact", ("k8s_dns",), "kube-dns Service, ready endpoints или CoreDNS Pods отсутствуют/нездоровы."),
     "dns.cluster_dns_mismatch": _entry("kubelet clusterDNS не совпадает с Service", "fact", ("k8s_dns",), "Явный clusterDNS kubelet отличается от ClusterIP kube-dns Service."),
     "controlplane.api_readyz_failed": _entry("API server readyz failed", "fact", ("k8s_api_health",), "Raw /readyz или одна из его проверок завершилась ошибкой."),
+    "controlplane.authentication_config_read_error": _entry("Ошибка чтения authentication config API server", "fact", ("k8s_auth_config",), "kube-apiserver сообщает, что настроенный authentication config нельзя прочитать; влияние и длительность проверяются отдельно."),
     "controlplane.apiservice_unavailable": _entry("Aggregated APIService недоступен", "fact", ("k8s_apiservice",), "APIService condition Available имеет False или Unknown."),
     "controlplane.node_lease_stale": _entry("Node Lease отсутствует или отстаёт", "correlation", ("k8s_leases", "k8s_nodes"), "Node Lease отсутствует либо существенно отстаёт от свежей peer Lease."),
     "controlplane.static_pod_unhealthy": _entry("Control-plane static Pod нездоров", "fact", ("k8s_api_health", "k8s_debug_pods"), "etcd/apiserver/scheduler/controller-manager Pod не Running или container не Ready."),
@@ -105,6 +107,7 @@ RULE_CATALOG = {
     "cgroup.driver_mismatch": _entry("Разные cgroup drivers kubelet/runtime", "fact", ("k8s_runtime", "kernel_cgroup2"), "Явно обнаруженные cgroupDriver kubelet и runtime не совпадают."),
     "cgroup.service_failure": _entry("cgroup denial связан с отказом сервиса", "correlation", ("kernel_cgroup2", "k8s_runtime"), "cgroup access denial и отказ kubelet/runtime произошли на одном узле в одном окне."),
     "security_agent.cgroup_denial": _entry("KESL и cgroup denial", "correlation", ("kernel_cgroup2", "kesl_compatibility"), "KESL установлен и обнаружено cgroup denial; правило не утверждает, что KESL является причиной."),
+    "security_agent.ptrace_alert": _entry("Kernel ptrace alert security agent", "fact", ("systemd_journal", "kesl_compatibility"), "Kernel/security agent зарегистрировал ptrace attack message; правило не утверждает вредоносность процесса или влияние на Kubernetes."),
     "time.not_synchronized": _entry("Время не синхронизировано", "fact", ("systemd_journal",), "timedatectl/chrony сообщает отсутствие синхронизации."),
     "certificate.expiring": _entry("Сертификат истёк или скоро истечёт", "fact", ("kubeadm_certs",), "notAfter находится в прошлом или ближе 30 суток."),
     "correlation.node_runtime_failure": _entry("Node NotReady и runtime/kubelet failure", "correlation", ("k8s_nodes", "k8s_runtime"), "События совпали на одном узле в 15-минутном окне."),

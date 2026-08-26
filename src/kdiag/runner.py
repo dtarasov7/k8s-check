@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from kdiag.util import utc_now
 
 
-DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+DEFAULT_PATH = "/opt/deckhouse/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
 @dataclass
@@ -101,8 +101,14 @@ def run_process(argv, timeout_seconds, max_stdout_bytes, max_stderr_bytes=128 * 
         )
     except (FileNotFoundError, PermissionError, OSError) as error:
         ended = time.monotonic()
+        if isinstance(error, FileNotFoundError):
+            message = "command unavailable: {0} (executable not found)".format(argv[0])
+        elif isinstance(error, PermissionError):
+            message = "command unavailable: {0} (permission denied)".format(argv[0])
+        else:
+            message = str(error)
         return ProcessResult(
-            list(argv), None, b"", b"", started_at, utc_now(), int((ended - started) * 1000), error=str(error)
+            list(argv), None, b"", b"", started_at, utc_now(), int((ended - started) * 1000), error=message
         )
 
     selector = selectors.DefaultSelector()

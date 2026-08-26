@@ -3,6 +3,7 @@ import json
 import re
 from datetime import datetime, timezone
 
+from kdiag.node_identity import match_node_identities
 from kdiag.rule_catalog import RULE_PACK_VERSION, rule_metadata
 from kdiag.runtime import ACTIVE_SERVICE_STATES, loaded_runtime_service_states, runtime_service_is_active
 
@@ -1489,19 +1490,15 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
         )
 
     if _source_collected(kubernetes, "nodes"):
-        inventory_names = set(node_snapshots)
-        inventory_names.update(
-            snapshot.get("host", {}).get("hostname")
-            for snapshot in node_snapshots.values()
-            if snapshot.get("host", {}).get("hostname")
-        )
-        kubernetes_names = set(
+        kubernetes_nodes = _kube_items(kubernetes, "nodes")
+        node_matches = match_node_identities(node_snapshots, kubernetes_nodes)
+        kubernetes_names = {
             (item.get("metadata") or {}).get("name")
-            for item in _kube_items(kubernetes, "nodes")
+            for item in kubernetes_nodes
             if (item.get("metadata") or {}).get("name")
-        )
-        missing_snapshots = sorted(kubernetes_names - inventory_names)
-        missing_objects = sorted(set(node_snapshots) - kubernetes_names)
+        }
+        missing_snapshots = sorted(kubernetes_names - set(node_matches.values()))
+        missing_objects = sorted(set(node_snapshots) - set(node_matches))
         if missing_snapshots or missing_objects:
             findings.append(
                 _finding(
@@ -2127,6 +2124,38 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
     volume_events = _events(normalized, "volume_error")
     if volume_events:
         findings.append(_event_finding("storage.volume_operation_failure", "warning", "Kubernetes сообщает об ошибках mount/attach volume", "Найдено событий: {0}.".format(len(volume_events)), volume_events, "Сопоставить Pod, PVC/PV, VolumeAttachment и CSI node/controller logs.", confidence="high", classification="fact"))
+
+    auth_config_events = _events(normalized, "authentication_config_read_error")
+    if auth_config_events:
+        findings.append(
+            _event_finding(
+                "controlplane.authentication_config_read_error",
+                "warning",
+                "kube-apiserver не может прочитать authentication config",
+                "В журналах kube-apiserver обнаружено ошибок чтения authentication config: {0}; это факт ошибки чтения, но не доказательство недоступности API.".format(len(auth_config_events)),
+                auth_config_events,
+                "Проверить фактический флаг authentication-config, mount/path и Deckhouse reconciliation вокруг первого/последнего события; не создавать пустой файл для подавления сообщения.",
+                confidence="none",
+                alternatives=["краткое окно атомарной замены файла", "устаревший flag или отсутствующий mount"],
+                classification="fact",
+            )
+        )
+
+    ptrace_events = _events(normalized, "ptrace_security_alert", {"journal"})
+    if ptrace_events:
+        findings.append(
+            _event_finding(
+                "security_agent.ptrace_alert",
+                "warning",
+                "Kernel/security agent зарегистрировал ptrace alert",
+                "Обнаружено ptrace attack messages: {0}; запись не устанавливает вредоносность процесса и не доказывает влияние на Kubernetes.".format(len(ptrace_events)),
+                ptrace_events,
+                "Зафиксировать обе программы, PID, решение security agent и соседние audit/KESL events; проверить policy и совместимость точных builds до изменения исключений.",
+                confidence="none",
+                alternatives=["легитимное взаимодействие двух security/backup agents", "защитная блокировка без влияния на workload"],
+                classification="fact",
+            )
+        )
 
     correlation_rules = {
         "node_runtime_failure": (

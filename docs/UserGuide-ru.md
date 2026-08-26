@@ -2,7 +2,7 @@
 
 ## 1. Назначение и границы решения
 
-<code>kdiag 0.7.0</code> создаёт разовый аварийный снимок Kubernetes-кластера и выполняет полностью автономный детерминированный анализ. Текущий scope диагностической совместимости — vanilla Kubernetes и Deckhouse CSE Pro 1.74 с Kubernetes 1.24–1.31, до 20 узлов и около 1000 Pod. Это scope форматов evidence и правил, а не заявление о lifecycle support.
+<code>kdiag 0.7.1</code> создаёт разовый аварийный снимок Kubernetes-кластера и выполняет полностью автономный детерминированный анализ. Текущий scope диагностической совместимости — vanilla Kubernetes и Deckhouse CSE Pro 1.74 с Kubernetes 1.24–1.31, до 20 узлов и около 1000 Pod. Это scope форматов evidence и правил, а не заявление о lifecycle support.
 
 Программа запускается на отдельном управляющем сервере. Она подключается к каждому узлу по SSH, выполняет диагностические команды через неинтерактивный sudo и опрашивает Kubernetes API с отдельным kubeconfig. Prometheus необязателен: снимок можно получить при недоступности Prometheus или всего Kubernetes API.
 
@@ -70,6 +70,8 @@ Ansible применяется только для разбора inventory и �
 - Беспарольный неинтерактивный <code>sudo -n</code> до root.
 - Persistent journald и стандартные средства диагностики: systemctl, journalctl, sysctl, df, ss, ip.
 - В целевом контуре доступно до 5 ГиБ на узел; стандартный лимит временного сжатого bundle равен только 32 МиБ.
+
+Node commands выполняются с фиксированным безопасным PATH: сначала <code>/opt/deckhouse/bin</code>, затем стандартные системные каталоги. Это позволяет находить поставляемые Deckhouse <code>crictl</code>, <code>containerd</code> и <code>runc</code> без наследования произвольного login PATH. Если необязательный CLI, например <code>nft</code> или <code>conntrack</code>, отсутствует, запись команды получает <code>unsupported</code>; это само по себе ничего не говорит о поддержке nftables или conntrack ядром.
 
 Временные данные на узле удаляются после нормально завершившейся передачи. После прерванного запуска следует проверить наличие остатков.
 
@@ -204,6 +206,8 @@ ssh cp01 sudo -n true
 ~~~
 
 Следует проверить каждый профиль подключения. Пароли и закрытые ключи нельзя помещать в конфигурацию снимка.
+
+Inventory alias не обязан совпадать с <code>metadata.name</code> Kubernetes Node. kdiag сравнивает alias, собранные hostname/FQDN, имя Node и <code>kubernetes.io/hostname</code>. Exact match имеет приоритет; short name и FQDN сопоставляются только однозначно. Неоднозначные identity остаются несопоставленными и создают <code>inventory.node_set_mismatch</code>, а не предполагаемую связь.
 
 ## 8. Справочник конфигурации
 
@@ -354,9 +358,11 @@ Host evidence сохранится, но структурные Kubernetes-пр�
 | <code>report.md</code> | Основной отчёт администратора. |
 | <code>manifest.json</code> | Размеры и SHA-256 файлов. |
 
-Имя inventory host может отличаться от имени Kubernetes Node; несогласованные hostname ухудшают корреляцию.
+Inventory alias и имя Kubernetes Node могут отличаться. Однозначные hostname/FQDN и уникальные short-name совпадения канонизируются к имени Kubernetes Node для Node-scoped correlation; неоднозначные identity остаются видимым mismatch.
 
-Coverage фиксируется для каждой node command, группы node Pod logs, Kubernetes source и отдельной записи Kubernetes logs. Collected parent bundle не скрывает внутренний `failed`, `timeout` или `truncated`. В `facts.json`, `findings.json` и `report.json` записывается ledger правил: `matched`, `not_matched`, `unknown` с отсутствующим evidence либо `not_applicable`. `unknown` — это пробел evidence, а не признак здоровья.
+Coverage фиксируется для каждой node command, группы node Pod logs, Kubernetes source и отдельной записи Kubernetes logs. Collected parent bundle не скрывает внутренний `failed`, `timeout` или `truncated`. В `facts.json`, `findings.json` и `report.json` записывается ledger правил: `matched`, `not_matched`, `unknown` с отсутствующим evidence либо `not_applicable`. Каждое правило объявляет собственные требования coverage: например, отказ Events влияет на event-dependent правила, но не на проверку Node condition при собранном Nodes source. `unknown` — rule-specific пробел evidence, а не признак здоровья.
+
+Раздел unknown fingerprints в `report.md` носит справочный характер и не является finding. Он показывает сбалансированное по компонентам подмножество — не более пяти templates на компонент, ограничивает длинные строки и выводит placeholders вида `<n>` и `<ipv6>` в читаемом code formatting. Полный bounded-набор сохраняется в `normalized-events.json.gz`.
 
 ~~~bash
 python3.8 dist/kdiag.pyz report /var/lib/kdiag/COLLECTION_ID
@@ -377,7 +383,7 @@ python3.8 dist/kdiag.pyz verify /var/lib/kdiag/COLLECTION_ID
 
 ## 12. Подробное описание проверок
 
-В артефакт встроено 96 отчётных правил. Точный каталог конкретной сборки:
+В артефакт встроено 98 отчётных правил. Точный каталог конкретной сборки:
 
 ~~~bash
 python3.8 dist/kdiag.pyz rules list
@@ -470,9 +476,9 @@ python3.8 dist/kdiag.pyz rules list --json
 
 Кластер может штатно работать без kube-proxy. Само его отсутствие никогда не создаёт finding; при включённом Cilium replacement это ожидаемое поддерживаемое состояние.
 
-### 12.6 cgroup и KESL
+### 12.6 cgroup и security agents
 
-Все правила этого подраздела отключаются параметром <code>collection.collect_cgroup=false</code> или CLI-флагом <code>--skip-cgroup</code>. Для старых collection без сохранённого параметра сохраняется прежнее поведение: проверки включены.
+Правила <code>cgroup.*</code> и <code>security_agent.cgroup_denial</code> отключаются параметром <code>collection.collect_cgroup=false</code> или CLI-флагом <code>--skip-cgroup</code>. Независимый ptrace alert остаётся включённым, поскольку не выводится из cgroup evidence. Для старых collection без сохранённого параметра сохраняется прежнее cgroup-поведение.
 
 Точные read-only команды для ручной проверки одного узла и шаблон обезличенного результата приведены в [отдельной инструкции](cgroup-manual-checks-ru.md).
 
@@ -482,6 +488,7 @@ python3.8 dist/kdiag.pyz rules list --json
 | <code>cgroup.driver_mismatch</code> | fact | Явные значения cgroup driver у kubelet и runtime различаются. | Выравнивать через утверждённую процедуру изменения платформы. |
 | <code>cgroup.service_failure</code> | correlation | cgroup denial/failure и отказ kubelet/runtime на одном узле за 15 минут. | Упорядочить timeline, проверить kernel/security audit evidence. |
 | <code>security_agent.cgroup_denial</code> | correlation | Обнаружен KESL и cgroup denial/failure в одном scope узла. | Зафиксировать точный build KESL, ядро и denied operation, проверить vendor policy/compatibility. Это не доказательство причины. |
+| <code>security_agent.ptrace_alert</code> | fact | В kernel/security-agent journal есть ptrace attack message с двумя участвующими процессами. | Зафиксировать обе программы/PID и соседние audit/KESL events; не выводить вредоносность или влияние на Kubernetes только из этой строки. |
 
 ### 12.7 Service, EndpointSlice и DNS
 
@@ -501,6 +508,7 @@ python3.8 dist/kdiag.pyz rules list --json
 | Правило | Тип | Что проверяется | Безопасное первое действие |
 |---|---|---|---|
 | <code>controlplane.api_readyz_failed</code> | fact | Полученный readyz verbose содержит failed subcheck либо ошибку endpoint. | Использовать имя subcheck для выбора evidence apiserver/зависимости. |
+| <code>controlplane.authentication_config_read_error</code> | fact | kube-apiserver сообщает, что настроенный authentication file нельзя прочитать. | Проверить effective flag, mount/path, права и окно Deckhouse reconciliation; не создавать пустой файл вместо отсутствующего. |
 | <code>controlplane.apiservice_unavailable</code> | fact | Aggregated APIService имеет Available=False или Unknown. | Изучить reason, backing Service/endpoints, TLS и extension server. |
 | <code>controlplane.node_lease_stale</code> | correlation | Lease отсутствует либо старше нового peer Lease более чем на max(120 с, 3 x leaseDurationSeconds). | Сравнить kubelet, доступ к API и часы; учесть глобальную остановку API. |
 | <code>controlplane.static_pod_unhealthy</code> | fact | Собранный mirror Pod etcd/apiserver/scheduler/controller-manager отсутствует или нездоров. | Сопоставить с control-plane node, проверить manifest, kubelet, container и зависимости. |
@@ -551,6 +559,7 @@ python3.8 dist/kdiag.pyz rules list --json
 ## 13. Устранение проблем самого сборщика
 
 - **Не работает SSH:** проверить имя после разбора inventory, OpenSSH config, host key, user/port, sudo -n и remote Python. Успешный Ansible playbook недостаточен: после разбора inventory kdiag вызывает OpenSSH.
+- **Node utility имеет статус unsupported:** проверить имя команды в coverage. Deckhouse tools ищутся в <code>/opt/deckhouse/bin</code>; отсутствие executable <code>nft</code> или <code>conntrack</code> означает отсутствие userspace client, а не доказанное отсутствие подсистемы ядра.
 - **Kubernetes отвечает Forbidden:** выполнить auth can-i с тем же kubeconfig/context и добавить только недостающее read-право. Отсутствующий Cilium CRD или CSIStorageCapacity может быть нормой; RBAC denial — другая ситуация.
 - **Нет readyz:** отличить недоступность API/TLS/auth от отсутствия права на non-resource URL. Отсутствие ответа не равно failed внутреннего subcheck.
 - **Нет etcd evidence:** проверить опцию, stacked topology, стандартные пути, etcdctl/crictl, container state и sudo. Нельзя копировать закрытый ключ только ради устранения finding.

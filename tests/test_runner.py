@@ -1,7 +1,7 @@
 import sys
 import unittest
 
-from kdiag.runner import run_process
+from kdiag.runner import DEFAULT_PATH, run_process
 
 
 class RunnerTest(unittest.TestCase):
@@ -22,7 +22,12 @@ class RunnerTest(unittest.TestCase):
 
     def test_missing_binary_is_unsupported(self):
         result = run_process(["/definitely/missing/kdiag-command"], 1, 128)
-        self.assertEqual("unsupported", result.record("missing")["status"])
+        record = result.record("missing")
+        self.assertEqual("unsupported", record["status"])
+        self.assertIn("command unavailable", record["error"])
+
+    def test_deckhouse_binary_directory_is_in_safe_path(self):
+        self.assertEqual("/opt/deckhouse/bin", DEFAULT_PATH.split(":")[0])
 
 
 if __name__ == "__main__":

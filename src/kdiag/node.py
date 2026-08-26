@@ -686,7 +686,7 @@ def collect_node_snapshot(since_hours, timeout_seconds, max_command_bytes, syste
         "started_at": started_at,
         "ended_at": utc_now(),
         "sensitivity": "confidential",
-        "options": {"collect_cgroup": collect_cgroup},
+        "options": {"collect_cgroup": collect_cgroup, "collect_etcd": collect_etcd},
         "host": {
             "hostname": socket.gethostname(),
             "fqdn": socket.getfqdn(),

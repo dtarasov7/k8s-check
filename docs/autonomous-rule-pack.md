@@ -1,6 +1,6 @@
 # Автономный rule pack kdiag
 
-Rule pack `2026.08.7` содержит 96 проверок и работает без сети, LLM и внешней базы знаний. После сборки все классификаторы, карточки правил, ссылки на первичные источники и synthetic self-test входят в `kdiag.pyz`.
+Rule pack `2026.08.8` содержит 98 проверок и работает без сети, LLM и внешней базы знаний. После сборки все классификаторы, карточки правил, ссылки на первичные источники и synthetic self-test входят в `kdiag.pyz`.
 
 ## Модель достоверности
 
@@ -8,7 +8,7 @@ Rule pack `2026.08.7` содержит 96 проверок и работает �
 - `correlation` — независимые события совпали на одном Node в 15-минутном окне. Это усиливает гипотезу, но не доказывает исходную первопричину.
 - `hypothesis` — сигнатура журнала или неполная комбинация evidence. Требуются указанные в рекомендации локальные проверки.
 
-Отсутствие finding не означает отсутствие проблемы. Ledger каждого правила использует `matched`, `not_matched`, `unknown` или `not_applicable`; при `unknown` перечисляется отсутствующий evidence.
+Отсутствие finding не означает отсутствие проблемы. Ledger каждого правила использует `matched`, `not_matched`, `unknown` или `not_applicable`; при `unknown` перечисляется отсутствующий evidence, объявленный зависимостью именно этого правила. Общий partial status или несвязанный log gap не переводит весь префикс правил в `unknown`.
 
 ## Pipeline
 
@@ -22,7 +22,7 @@ Rule pack `2026.08.7` содержит 96 проверок и работает �
 
 ## Покрытие
 
-- coverage каждой node command/Pod log/Kubernetes source, collector gaps, normalization truncation, reboot boundary, расхождение inventory/Node objects и mixed kernel/API server inventory;
+- coverage каждой node command/Pod log/Kubernetes source, per-rule зависимости coverage, collector gaps, normalization truncation, reboot boundary, однозначное сопоставление inventory hostname/FQDN с Node objects и mixed kernel/API server inventory;
 - root disk и inode exhaustion;
 - kubelet/container runtime state для vanilla containerd, CRI-O и Deckhouse containerd с исключением отсутствующих/неиспользуемых альтернативных units;
 - Node Ready/Unknown, Memory/Disk/PID pressure и NetworkUnavailable;
@@ -31,12 +31,12 @@ Rule pack `2026.08.7` содержит 96 проверок и работает �
 - readiness/liveness/startup probe taxonomy;
 - IPv6, CNI и Cilium Pod health;
 - cgroup v2 controllers, kubelet/runtime driver mismatch и cgroup access denial;
-- осторожная корреляция KESL с cgroup denial без утверждения причинности;
+- осторожная корреляция KESL с cgroup denial и отдельный ptrace alert без утверждения причинности/вредоносности;
 - kernel OOM и conntrack table full;
 - адаптированные Node Problem Detector `v0.8.25` signatures: KernelOops, TaskHung, netdevice, EXT4/XFS, Buffer I/O и hardware errors;
 - Service → EndpointSlice → ready endpoint/port, kube-dns Service/CoreDNS в `d8-kube-dns` или `kube-system`, Corefile plugins/forward targets и kubelet resolver/clusterDNS;
 - Cilium kube-proxy replacement и сравнение Service ClusterIP с read-only service maps; отсутствие kube-proxy само по себе штатно;
-- API server readyz, aggregated APIService, Node Lease и control-plane Pod health;
+- API server readyz, ошибки чтения authentication config, aggregated APIService, Node Lease и control-plane Pod health;
 - stacked-etcd endpoint health/status, active alarms, Raft/revision lag, backend quota, fragmentation и member version drift через allowlisted read-only commands;
 - PVC/PV/StorageClass, VolumeAttachment, CSIDriver/CSINode и CiliumEndpoint/CiliumNode/policy status;
 - CRI RuntimeReady/NetworkReady, активный swap, отдельные runtime filesystems и Kubernetes version skew;
@@ -75,6 +75,7 @@ Rule pack `2026.08.7` содержит 96 проверок и работает �
 - CRI troubleshooting: <https://kubernetes.io/docs/tasks/debug/debug-cluster/crictl/>;
 - Prometheus HTTP API: <https://prometheus.io/docs/prometheus/latest/querying/api/>;
 - API health endpoints: <https://kubernetes.io/docs/reference/using-api/health-checks/>;
+- Kubernetes authentication configuration: <https://kubernetes.io/docs/reference/access-authn-authz/authentication-config/>;
 - Kubernetes Lease: <https://kubernetes.io/docs/concepts/architecture/leases/>;
 - etcd cluster status и maintenance: <https://etcd.io/docs/v3.5/tutorials/how-to-check-cluster-status/>, <https://etcd.io/docs/v3.5/op-guide/maintenance/>.
 
