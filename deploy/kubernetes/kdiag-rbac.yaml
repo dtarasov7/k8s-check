@@ -68,6 +68,54 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: kdiag-pod-logs
+  namespace: d8-kube-dns
+rules:
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kdiag-pod-logs
+  namespace: d8-kube-dns
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kdiag-pod-logs
+subjects:
+  - kind: ServiceAccount
+    name: kdiag-reader
+    namespace: kdiag-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kdiag-pod-logs
+  namespace: d8-cni-cilium
+rules:
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kdiag-pod-logs
+  namespace: d8-cni-cilium
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kdiag-pod-logs
+subjects:
+  - kind: ServiceAccount
+    name: kdiag-reader
+    namespace: kdiag-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kdiag-pod-logs
   namespace: kube-system
 rules:
   - apiGroups: [""]

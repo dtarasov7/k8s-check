@@ -1,6 +1,6 @@
 # Автономный rule pack kdiag
 
-Rule pack `2026.08.4` содержит 93 проверки и работает без сети, LLM и внешней базы знаний. После сборки все классификаторы, карточки правил, ссылки на первичные источники и synthetic self-test входят в `kdiag.pyz`.
+Rule pack `2026.08.7` содержит 96 проверок и работает без сети, LLM и внешней базы знаний. После сборки все классификаторы, карточки правил, ссылки на первичные источники и synthetic self-test входят в `kdiag.pyz`.
 
 ## Модель достоверности
 
@@ -8,21 +8,21 @@ Rule pack `2026.08.4` содержит 93 проверки и работает �
 - `correlation` — независимые события совпали на одном Node в 15-минутном окне. Это усиливает гипотезу, но не доказывает исходную первопричину.
 - `hypothesis` — сигнатура журнала или неполная комбинация evidence. Требуются указанные в рекомендации локальные проверки.
 
-Отсутствие finding не означает отсутствие проблемы. Недоступный источник отмечается отдельно; правило не должно превращать missing evidence в `not_matched`.
+Отсутствие finding не означает отсутствие проблемы. Ledger каждого правила использует `matched`, `not_matched`, `unknown` или `not_applicable`; при `unknown` перечисляется отсутствующий evidence.
 
 ## Pipeline
 
 1. JSON-строки journald, node CRI logs, Kubernetes Events, Node conditions, Pod/container states и разрешённые Pod logs приводятся к единому event envelope.
 2. Текст классифицируется по устойчивым семантическим признакам: component/reason, errno, cgroup path, Kubernetes reason и network error class. Точные динамические значения не входят в fingerprint.
-3. На диск попадают категоризированные события и до 100 приблизительных heavy hitters неизвестных fingerprints. Для каждого сохранены оценка частоты и её максимальная ошибка; полные исходные журналы остаются в исходных gzip bundles.
-4. Корреляции строятся только внутри одного Node либо одного Pod scope и в окне 900 секунд.
-5. Rule evaluator формирует findings с `classification`, `causal_confidence`, evidence, alternatives, безопасной рекомендацией и первичными источниками.
+3. Категоризированные записи дедуплицируются и round-robin ограничиваются по source/scope/category; счётчики dropped/truncated сохраняются по источникам.
+4. Корреляции используют только реальные, не inferred timestamps. Probe episodes ограничены одним Pod, node/runtime/CNI/storage — одним Node. Для независимых episodes сохраняются start/end/duration/ID.
+5. Rule evaluator формирует findings с `classification`, detection/causal confidence, bounded evidence excerpts, alternatives, counter-evidence, missing checks и безопасной рекомендацией.
 
-Фиксированные защитные пределы нормализатора: не более 50 000 категоризированных событий и 100 неизвестных fingerprints в памяти и на диске на один snapshot. Превышение лимита events отображается как `stats.truncated=true` и `dropped_records`; замещения unknown heavy hitters — как `unknown_fingerprint_replacements`.
+Фиксированные защитные пределы нормализатора: не более 200 000 candidates, 50 000 сохранённых категоризированных событий и 100 неизвестных fingerprints на snapshot. Превышение отображается в `candidate_limit_drops`, `output_limit_drops`, `dropped_by_source` и finding `collector.normalization_truncated`; замещения unknown heavy hitters — в `unknown_fingerprint_replacements`.
 
 ## Покрытие
 
-- collector gaps, reboot boundary и mixed kernel inventory;
+- coverage каждой node command/Pod log/Kubernetes source, collector gaps, normalization truncation, reboot boundary, расхождение inventory/Node objects и mixed kernel/API server inventory;
 - root disk и inode exhaustion;
 - kubelet/container runtime state для vanilla containerd, CRI-O и Deckhouse containerd с исключением отсутствующих/неиспользуемых альтернативных units;
 - Node Ready/Unknown, Memory/Disk/PID pressure и NetworkUnavailable;
@@ -34,7 +34,7 @@ Rule pack `2026.08.4` содержит 93 проверки и работает �
 - осторожная корреляция KESL с cgroup denial без утверждения причинности;
 - kernel OOM и conntrack table full;
 - адаптированные Node Problem Detector `v0.8.25` signatures: KernelOops, TaskHung, netdevice, EXT4/XFS, Buffer I/O и hardware errors;
-- Service → EndpointSlice → ready endpoint/port, kube-dns Service/CoreDNS, Corefile plugins/forward targets и kubelet resolver/clusterDNS;
+- Service → EndpointSlice → ready endpoint/port, kube-dns Service/CoreDNS в `d8-kube-dns` или `kube-system`, Corefile plugins/forward targets и kubelet resolver/clusterDNS;
 - Cilium kube-proxy replacement и сравнение Service ClusterIP с read-only service maps; отсутствие kube-proxy само по себе штатно;
 - API server readyz, aggregated APIService, Node Lease и control-plane Pod health;
 - stacked-etcd endpoint health/status, active alarms, Raft/revision lag, backend quota, fragmentation и member version drift через allowlisted read-only commands;

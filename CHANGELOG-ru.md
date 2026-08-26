@@ -6,14 +6,24 @@
 
 ## [Не выпущено]
 
+## [0.7.0] - 2026-08-26
+
 ### Добавлено
 
+- Добавлены coverage по node commands, node/Kubernetes Pod logs и Kubernetes sources, а также ledger из 96 правил со статусами matched, not-matched, unknown и not-applicable.
+- Добавлены bounded evidence cards, независимые scoped correlation episodes с временем, справедливое ограничение events, дедупликация, counters отбрасывания по sources, поиск расхождения inventory/Node и finding об усечении нормализации.
+- Добавлен discovery Deckhouse CSE Pro 1.74 для ConfigMap/log namespaces Cilium/CoreDNS с fallback к vanilla; kube-proxy остаётся необязательным.
+- Local/external LLM packages теперь содержат bounded evidence fragments status/value/excerpt/timestamp; внешние fragments псевдонимизируются и проходят DLP, token/evidence maps остаются приватными.
+- Findings об ошибках CoreDNS resolution теперь показывают до 20 уникальных имён неуспешных запросов, query type и частоту; ссылки на строки остаются evidence.
 - Добавлены `collection.collect_cgroup=false` и `--skip-cgroup`: прямые cgroup facts не собираются, cgroup events/correlations и связанные findings подавляются, а выбранный режим фиксируется в collection и отчётах.
 - Добавлена отключаемая визуализация выполнения `--progress off|summary|detail` в `stderr`: этапы, состояние сбора по узлам, категории node evidence и статусы Kubernetes API sources.
 - Добавлена поддержка Deckhouse `containerd-deckhouse.service` наряду с vanilla `containerd.service` и `crio.service`; scope rule pack расширен до Kubernetes 1.24–1.31.
 
 ### Исправлено
 
+- Устранены ложные findings для старых ротированных kubelet client certificates, нормального StatefulSet revision drift, активных retry Job, пустого массива CoreDNS container statuses, отфильтрованных Service selectors, отсутствующего Cilium coverage, пустой успешно собранной Cilium service map, per-interface IPv6 disable и неверной границы version skew.
+- Все inferred timestamps исключены из причинных correlations; `collect_cgroup=false` подавляет событие целиком, включая EROFS/read-only labels.
+- Read-only EROFS/container snapshot mounts внутри каталога containerd больше не считаются заполненными runtime filesystems; проверка анализирует только отдельные backing mount points runtime, kubelet и logs.
 - Runtime units с `LoadState=not-found` больше не создают `runtime_unavailable`/`node.runtime_inactive`; неактивный альтернативный runtime игнорируется, если другой загруженный runtime работает.
 - Снимок статического systemd state больше не получает искусственную временную причинность в 15-минутных correlations; для временной корреляции требуется реальное timestamped event.
 

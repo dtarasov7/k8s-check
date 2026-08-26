@@ -23,6 +23,9 @@ class RBACTest(unittest.TestCase):
         self.assertNotIn('verbs: ["update"]', text)
         self.assertNotIn('verbs: ["patch"]', text)
         self.assertNotIn('verbs: ["delete"]', text)
+        for namespace in ("d8-kube-dns", "d8-cni-cilium", "kube-system"):
+            self.assertIn("namespace: {0}".format(namespace), text)
+        self.assertEqual(3, text.count('resources: ["pods/log"]'))
 
 
 if __name__ == "__main__":

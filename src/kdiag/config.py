@@ -39,7 +39,7 @@ DEFAULT_CONFIG = {
         "command_timeout_seconds": 30,
         "max_wire_bytes": 64 * MIB,
         "max_bundle_bytes": 128 * MIB,
-        "system_namespaces": ["kube-system"],
+        "system_namespaces": ["d8-cni-cilium", "d8-kube-dns", "kube-system"],
         "application_namespaces": [],
         "collect_system_logs": True,
         "log_tail_lines": 200,

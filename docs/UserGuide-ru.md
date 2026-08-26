@@ -2,7 +2,7 @@
 
 ## 1. Назначение и границы решения
 
-<code>kdiag 0.6.0</code> создаёт разовый аварийный снимок Kubernetes-кластера и выполняет полностью автономный детерминированный анализ. Текущий scope диагностической совместимости — vanilla Kubernetes и Deckhouse с Kubernetes 1.24–1.31, до 20 узлов и около 1000 Pod. Это scope форматов evidence и правил, а не заявление о lifecycle support: ветки Kubernetes 1.24 и 1.31 уже завершили upstream-поддержку.
+<code>kdiag 0.7.0</code> создаёт разовый аварийный снимок Kubernetes-кластера и выполняет полностью автономный детерминированный анализ. Текущий scope диагностической совместимости — vanilla Kubernetes и Deckhouse CSE Pro 1.74 с Kubernetes 1.24–1.31, до 20 узлов и около 1000 Pod. Это scope форматов evidence и правил, а не заявление о lifecycle support.
 
 Программа запускается на отдельном управляющем сервере. Она подключается к каждому узлу по SSH, выполняет диагностические команды через неинтерактивный sudo и опрашивает Kubernetes API с отдельным kubeconfig. Prometheus необязателен: снимок можно получить при недоступности Prometheus или всего Kubernetes API.
 
@@ -119,7 +119,7 @@ python3.8 kdiag.pyz self-test
 
 Перед применением манифеста нужно проверить subjects во всех binding. Нельзя добавлять Secrets, pods/exec или write-глаголы. Roles для прикладных namespace автоматически не создаются: необходимо создать аналогичные namespaced Role и RoleBinding, привязать их к <code>kdiag-system/kdiag-reader</code> и добавить в конфигурацию только согласованный namespace.
 
-Сборщик читает Nodes, Pods, Events, workload-объекты, Services, EndpointSlices, PDB, PVC, PV, APIService, Leases, VolumeAttachments, CSI-объекты, StorageClasses, NetworkPolicies, выбранные Cilium CRD, разрешённые поля ConfigMap <code>cilium-config</code> и <code>coredns</code>, non-resource URL <code>/readyz</code> и журналы Pod только в разрешённых namespace.
+Сборщик читает Nodes, Pods, Events, workload-объекты, Services, EndpointSlices, PDB, PVC, PV, APIService, Leases, VolumeAttachments, CSI-объекты, StorageClasses, NetworkPolicies, выбранные Cilium CRD, разрешённые поля ConfigMap <code>cilium-config</code> и <code>coredns</code>, non-resource URL <code>/readyz</code> и журналы Pod только в разрешённых namespace. Discovery ConfigMap сначала проверяет Deckhouse locations (`d8-cni-cilium`, `d8-kube-dns`), затем vanilla `kube-system`, сохраняя все attempts и выбранный object.
 
 ### Создание kubeconfig для kdiag-reader
 
@@ -244,7 +244,7 @@ ssh cp01 sudo -n true
 | <code>kubernetes.command_timeout_seconds</code> | 30 | Таймаут каждого запроса. |
 | <code>kubernetes.max_wire_bytes</code> | 67108864 | Максимум исходного ответа API. |
 | <code>kubernetes.max_bundle_bytes</code> | 134217728 | Максимум сжатого Kubernetes bundle. |
-| <code>kubernetes.system_namespaces</code> | [kube-system] | Allowlist системных журналов Pod. |
+| <code>kubernetes.system_namespaces</code> | [d8-cni-cilium, d8-kube-dns, kube-system] | Allowlist системных Pod logs vanilla и Deckhouse. |
 | <code>kubernetes.application_namespaces</code> | [] | Явный allowlist прикладных журналов; пустой означает запрет. |
 | <code>kubernetes.collect_system_logs</code> | true | Собирать ограниченные системные Pod logs. |
 | <code>kubernetes.log_tail_lines</code> | 200 | Tail строк каждого контейнера. |
@@ -356,6 +356,8 @@ Host evidence сохранится, но структурные Kubernetes-пр�
 
 Имя inventory host может отличаться от имени Kubernetes Node; несогласованные hostname ухудшают корреляцию.
 
+Coverage фиксируется для каждой node command, группы node Pod logs, Kubernetes source и отдельной записи Kubernetes logs. Collected parent bundle не скрывает внутренний `failed`, `timeout` или `truncated`. В `facts.json`, `findings.json` и `report.json` записывается ledger правил: `matched`, `not_matched`, `unknown` с отсутствующим evidence либо `not_applicable`. `unknown` — это пробел evidence, а не признак здоровья.
+
 ~~~bash
 python3.8 dist/kdiag.pyz report /var/lib/kdiag/COLLECTION_ID
 python3.8 dist/kdiag.pyz verify /var/lib/kdiag/COLLECTION_ID
@@ -371,11 +373,11 @@ python3.8 dist/kdiag.pyz verify /var/lib/kdiag/COLLECTION_ID
 
 Отсутствие finding не доказывает отсутствие проблемы. Evidence мог оказаться за временным окном, быть усечён, запрещён RBAC, находиться на недоступном узле, иметь неизвестную сигнатуру или нестандартное расположение.
 
-Нормализуются journald JSON, прямые CRI logs, Kubernetes Events, Node conditions, состояния Pod/контейнеров, выбранные Pod logs и systemd. Сохраняется не более 50 000 категоризированных событий и 100 приблизительных heavy-hitter fingerprints неизвестных сообщений. Корреляции охватывают runtime/Node, CNI/Node, probe/network, memory/OOM, storage, cgroup/service, certificate/API и conntrack/network.
+Нормализуются journald JSON, прямые CRI logs, Kubernetes Events, Node conditions, состояния Pod/контейнеров, выбранные Pod logs и systemd. Записи дедуплицируются, output справедливо ограничивается по source/scope/category, inferred timestamps исключаются из причинных correlations. Результат корреляции состоит из независимых Pod- или Node-scoped episodes с началом, концом, duration и episode ID. Усечение создаёт явные per-source counters и finding.
 
 ## 12. Подробное описание проверок
 
-В артефакт встроено 93 отчётных правила. Точный каталог конкретной сборки:
+В артефакт встроено 96 отчётных правил. Точный каталог конкретной сборки:
 
 ~~~bash
 python3.8 dist/kdiag.pyz rules list
@@ -389,7 +391,9 @@ python3.8 dist/kdiag.pyz rules list --json
 |---|---|---|---|
 | <code>collector.node_gap</code> | fact | Запрошенный node bundle отсутствует, завершился ошибкой/таймаутом или неприемлем. | Восстановить SSH/sudo/Python/диск, предварительно сохранить частичный снимок. |
 | <code>collector.evidence_gap</code> | fact | Обязательные журналы, Pod logs или Kubernetes-источники запрещены, не собраны, не поддержаны или усечены. Отсутствие опциональных Cilium CRD, CSIStorageCapacity или Prometheus само по себе исключено. | Изучить статусы и исправить только недостающее право, таймаут или лимит. |
+| <code>collector.normalization_truncated</code> | fact | Лимиты нормализации исключили часть категоризированных записей. | Считать зависимые отрицательные результаты неполными и менять только нужный лимит/окно. |
 | <code>collector.boot_changed</code> | fact | Boot ID узла изменился во время сбора. | Разделить timeline по перезагрузке; состояния до/после не были одновременными. |
+| <code>inventory.node_set_mismatch</code> | fact | Inventory snapshots и Kubernetes Node objects расходятся. | Проверить aliases inventory, состав кластера и SSH-доступ. |
 | <code>collector.etcd_evidence_gap</code> | fact | Включённый сбор etcd недоступен, частичен, не поддержан или ошибочен. | Проверить топологию, пути, инструменты и права; отсутствие данных не означает здоровье. |
 | <code>inventory.mixed_kernel</code> | fact | На узлах обнаружено более одной версии ядра. | Сравнить модули и совместимость Cilium/runtime/KESL, историю rollout; неоднородность — риск, не автоматическая неисправность. |
 | <code>inventory.unsupported_version_skew</code> | fact | Minor-версии kube-apiserver или kubelet выходят за поддерживаемый skew. | Планировать выравнивание по version-skew policy; не менять порядок upgrade импровизированно. |
@@ -409,7 +413,7 @@ python3.8 dist/kdiag.pyz rules list --json
 | <code>runtime.cri_not_ready</code> | fact | CRI сообщает RuntimeReady=False. | Проверить runtime service/socket, cgroups и runtime storage. |
 | <code>runtime.cri_network_not_ready</code> | fact | CRI сообщает NetworkReady=False. | Проверить Cilium, CNI config и sandbox Events на узле. |
 | <code>node.swap_active</code> | fact | Swap активен, а kubelet failSwapOn не отключён. | Сопоставить policy kubelet и фактический swap до изменения узла. |
-| <code>node.low_runtime_disk</code> | fact | Отдельная kubelet/runtime/log filesystem заполнена не менее чем на 90%. | Найти потребителя на mount; не удалять runtime data вслепую. |
+| <code>node.low_runtime_disk</code> | fact | Отдельная backing filesystem для kubelet/runtime/log data заполнена не менее чем на 90%. Read-only container snapshot submounts, включая EROFS layers, игнорируются. | Найти потребителя на mount; не удалять runtime data вслепую. |
 | <code>certificate.kubelet_rotation_broken</code> | fact | Rotation включена, но kubelet-client-current.pem или target некорректны. | Проверить symlink, target certificate и kubelet journal; не заменять сертификаты автоматически. |
 
 ### 12.3 Kernel-проверки на основе Node Problem Detector
@@ -489,7 +493,7 @@ python3.8 dist/kdiag.pyz rules list --json
 | <code>dns.kube_dns_unavailable</code> | fact | kube-dns отсутствует/не имеет ready endpoints либо CoreDNS Pods отсутствуют, не Running или не полностью Ready. | Проверить CoreDNS, Service/Slices, Cilium и upstream resolvers. |
 | <code>dns.cluster_dns_mismatch</code> | fact | Явный kubelet clusterDNS не пересекается с ClusterIP kube-dns. | Проверить все address families и источники kubelet config, затем контролируемый rollout. |
 | <code>dns.nameserver_limit_exceeded</code> | fact | Resolver kubelet содержит более трёх nameserver. | Проверить kubelet resolvConf и при необходимости утверждённый local caching resolver. |
-| <code>dns.coredns_errors</code> | fact | В CoreDNS logs есть SERVFAIL, forwarding loop или upstream failure. | Проверить forward targets, loop plugin, upstream reachability и resolver узлов. |
+| <code>dns.coredns_errors</code> | fact | В CoreDNS logs есть SERVFAIL, forwarding loop или upstream failure. Отчёт группирует до 20 извлечённых query names по типу и частоте, сохраняя ссылки на исходные строки. | Проверить имена на опечатки и несуществующие zones, затем forward targets, loop plugin, upstream reachability и resolver узлов. |
 | <code>dns.coredns_config_empty</code> | fact | ConfigMap coredns не содержит непустой Corefile. | Восстановить утверждённый Corefile через change control. |
 
 ### 12.8 Control plane и API
@@ -580,7 +584,7 @@ LLM-конвейер разделён на явные стадии. «Миним
 | `llm analyze-local` | нет | нет | только локальный service |
 | `llm import-response` | нет | восстанавливает известные внешние токены | нет |
 
-Исходный collection остаётся конфиденциальным и не передаётся inference service. Оба профиля исключают raw bundles узлов/Kubernetes, полные журналы и полные Pod logs и ограничивают размер package.
+Исходный collection остаётся конфиденциальным и не передаётся inference service. Оба профиля исключают raw bundles и полные logs, но включают выбранные bounded evidence fragments с `status`, `value`, `excerpt`, `timestamp` для своих `EVIDENCE_NNN`. Усечение fragments/events/fingerprints отражается явно.
 
 ### 15.1 Подготовка локального package
 
@@ -653,7 +657,7 @@ python3.8 dist/kdiag.pyz llm prepare /var/lib/kdiag/<collection-id> \
 python3.8 dist/kdiag.pyz llm validate-export /secure/llm-external/export
 ~~~
 
-Внешний профиль заменяет известные значения топологии и identities на incident-local tokens и запрещает экспорт, если outbound DLP обнаруживает остаточный IP/CIDR, MAC, DNS, URL, e-mail, UID, абсолютный host path, credential pattern, private key, JWT или canary. Названия и версии Kubernetes, Cilium, container runtime, etcd, CoreDNS, kernel и RED OS сохраняются. Просмотрите `preview.md`, `incident.external.json`, `prompt.external.txt` и `redaction-report.json`, после чего вручную передайте только содержимое `export/`. Соседний `private/token-map.json` передавать нельзя.
+Внешний профиль заменяет node/host, namespace, Pod, Service, user/account/ServiceAccount, network topology, path, UID и endpoint values во findings и evidence fragments. Экспорт запрещается, если outbound DLP обнаруживает остаточный IP/CIDR, MAC, DNS, URL, e-mail, UID, абсолютный host path, credential pattern, private key, JWT или canary. Названия и версии Kubernetes, Cilium, container runtime, etcd, CoreDNS, kernel и RED OS сохраняются. Просмотрите `preview.md`, `incident.external.json`, `prompt.external.txt` и `redaction-report.json`, после чего вручную передайте только содержимое `export/`. Соседний `private/token-map.json` передавать нельзя.
 
 ### 15.4 Импорт сохранённого вручную внешнего ответа
 

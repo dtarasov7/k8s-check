@@ -46,6 +46,18 @@ ALLOWED_CILIUM_CONFIG_KEYS = (
 )
 
 
+CONFIGMAP_CANDIDATES = {
+    "cilium_config": (
+        ("d8-cni-cilium", "cilium-config"),
+        ("kube-system", "cilium-config"),
+    ),
+    "coredns_config": (
+        ("d8-kube-dns", "coredns"),
+        ("kube-system", "coredns"),
+    ),
+}
+
+
 def snapshot_status(snapshot, logs_required):
     statuses = [
         item.get("status")
@@ -62,9 +74,19 @@ def snapshot_status(snapshot, logs_required):
     return "unreachable"
 
 
-def _metadata(value, allowed_labels=()):
+def _metadata(value, allowed_labels=(), allowed_annotations=()):
     metadata = value or {}
     labels = metadata.get("labels", {}) or {}
+    annotations = metadata.get("annotations", {}) or {}
+    owners = []
+    for owner in (metadata.get("ownerReferences") or [])[:20]:
+        owners.append(
+            {
+                key: owner.get(key)
+                for key in ("apiVersion", "kind", "name", "uid", "controller", "blockOwnerDeletion")
+                if key in owner
+            }
+        )
     return {
         "name": metadata.get("name"),
         "namespace": metadata.get("namespace"),
@@ -74,8 +96,10 @@ def _metadata(value, allowed_labels=()):
         "deletionTimestamp": metadata.get("deletionTimestamp"),
         "deletionGracePeriodSeconds": metadata.get("deletionGracePeriodSeconds"),
         "finalizers": [str(value)[:256] for value in (metadata.get("finalizers") or [])[:20]],
+        "ownerReferences": owners,
         "labels": {key: labels[key] for key in allowed_labels if key in labels},
         "labelsProjectionComplete": all(key in allowed_labels for key in labels),
+        "annotations": {key: str(annotations[key])[:1024] for key in allowed_annotations if key in annotations},
     }
 
 
@@ -237,9 +261,37 @@ def project_pod(item):
         "metadata": _metadata(item.get("metadata"), ALLOWED_POD_LABELS),
         "spec": {
             "nodeName": spec.get("nodeName"),
+            "schedulerName": spec.get("schedulerName"),
+            "priority": spec.get("priority"),
+            "priorityClassName": spec.get("priorityClassName"),
+            "serviceAccountName": spec.get("serviceAccountName"),
             "hostNetwork": spec.get("hostNetwork"),
             "dnsPolicy": spec.get("dnsPolicy"),
+            "dnsConfig": {
+                "nameservers": (spec.get("dnsConfig") or {}).get("nameservers"),
+                "searches": (spec.get("dnsConfig") or {}).get("searches"),
+                "options": [
+                    {key: option.get(key) for key in ("name", "value") if key in option}
+                    for option in ((spec.get("dnsConfig") or {}).get("options") or [])[:20]
+                ],
+            } if spec.get("dnsConfig") else None,
             "restartPolicy": spec.get("restartPolicy"),
+            "nodeSelector": {
+                key: value
+                for key, value in (spec.get("nodeSelector") or {}).items()
+                if key in ALLOWED_NODE_LABELS
+            },
+            "tolerations": [
+                {key: value.get(key) for key in ("key", "operator", "effect", "tolerationSeconds") if key in value}
+                for value in (spec.get("tolerations") or [])[:50]
+            ],
+            "persistentVolumeClaims": sorted(
+                {
+                    str((volume.get("persistentVolumeClaim") or {}).get("claimName"))[:253]
+                    for volume in (spec.get("volumes") or [])
+                    if (volume.get("persistentVolumeClaim") or {}).get("claimName")
+                }
+            ),
             "containers": _containers(spec.get("containers")),
             "initContainers": _containers(spec.get("initContainers")),
         },
@@ -252,6 +304,8 @@ def project_pod(item):
             "startTime": status.get("startTime"),
             "reason": status.get("reason"),
             "message": str(status.get("message", ""))[:4096],
+            "qosClass": status.get("qosClass"),
+            "nominatedNodeName": status.get("nominatedNodeName"),
             "conditions": _conditions(status.get("conditions")),
             "containerStatuses": _container_statuses(status.get("containerStatuses")),
             "initContainerStatuses": _container_statuses(status.get("initContainerStatuses")),
@@ -272,10 +326,12 @@ def project_event(item):
         "regarding": {"apiVersion": regarding.get("apiVersion"), "kind": regarding.get("kind"), "namespace": regarding.get("namespace"), "name": regarding.get("name"), "uid": regarding.get("uid")},
         "reportingController": item.get("reportingController") or item.get("source", {}).get("component"),
         "reportingInstance": item.get("reportingInstance") or item.get("source", {}).get("host"),
+        "action": item.get("action"),
         "eventTime": item.get("eventTime"),
         "firstTimestamp": item.get("firstTimestamp"),
         "lastTimestamp": item.get("lastTimestamp"),
-        "count": item.get("count") or item.get("series", {}).get("count"),
+        "seriesLastObservedTime": (item.get("series") or {}).get("lastObservedTime"),
+        "count": item.get("count") if item.get("count") is not None else (item.get("series") or {}).get("count"),
     }
 
 
@@ -293,7 +349,7 @@ def project_workload(item):
             "strategy": spec.get("strategy"),
         },
         "status": {
-            key: status.get(key)
+            key: (_conditions(status.get(key)) if key == "conditions" else status.get(key))
             for key in (
                 "observedGeneration",
                 "replicas",
@@ -401,6 +457,7 @@ def project_service(item):
             "externalTrafficPolicy": spec.get("externalTrafficPolicy"),
             "internalTrafficPolicy": spec.get("internalTrafficPolicy"),
             "selector": _selector({"matchLabels": selector}).get("matchLabels", {}),
+            "selectorPresent": "selector" in spec and spec.get("selector") is not None,
             "selectorProjectionComplete": all(key in ALLOWED_POD_LABELS for key in selector),
             "ports": spec.get("ports"),
         },
@@ -438,10 +495,14 @@ def project_generic_status(item):
     return {
         "apiVersion": item.get("apiVersion"),
         "kind": item.get("kind"),
-        "metadata": _metadata(item.get("metadata"), ALLOWED_POD_LABELS),
+        "metadata": _metadata(
+            item.get("metadata"),
+            ALLOWED_POD_LABELS,
+            ("volume.kubernetes.io/selected-node", "pv.kubernetes.io/bind-completed"),
+        ),
         "spec": {
             key: spec.get(key)
-            for key in ("storageClassName", "volumeName", "accessModes", "resources", "nodeName")
+            for key in ("storageClassName", "volumeName", "volumeMode", "accessModes", "resources", "nodeName")
             if key in spec
         },
         "status": {
@@ -592,6 +653,33 @@ def project_csi_storage_capacity(item):
 def project_network_policy(item):
     spec = item.get("spec", {}) or {}
     selector = spec.get("podSelector", {}) or {}
+
+    def peer(value):
+        value = value or {}
+        ip_block = value.get("ipBlock") or {}
+        return {
+            "podSelector": _selector(value.get("podSelector")) if "podSelector" in value else None,
+            "namespaceSelector": _selector(value.get("namespaceSelector")) if "namespaceSelector" in value else None,
+            "ipBlock": {
+                "cidr": ip_block.get("cidr"),
+                "except": (ip_block.get("except") or [])[:50],
+            } if ip_block else None,
+        }
+
+    def policy_rules(values, peer_key):
+        result = []
+        for rule in (values or [])[:100]:
+            result.append(
+                {
+                    "peers": [peer(value) for value in (rule.get(peer_key) or [])[:100]],
+                    "ports": [
+                        {key: port.get(key) for key in ("protocol", "port", "endPort") if key in port}
+                        for port in (rule.get("ports") or [])[:100]
+                    ],
+                }
+            )
+        return result
+
     return {
         "apiVersion": item.get("apiVersion"),
         "kind": item.get("kind", "NetworkPolicy"),
@@ -602,6 +690,8 @@ def project_network_policy(item):
             "policyTypes": spec.get("policyTypes"),
             "ingressRuleCount": len(spec.get("ingress", []) or []),
             "egressRuleCount": len(spec.get("egress", []) or []),
+            "ingress": policy_rules(spec.get("ingress"), "from"),
+            "egress": policy_rules(spec.get("egress"), "to"),
         },
     }
 
@@ -624,16 +714,25 @@ def project_cilium_endpoint(item):
 
 
 def project_cilium_node(item):
+    spec = item.get("spec", {}) or {}
     status = item.get("status", {}) or {}
     operator_status = ((status.get("ipam") or {}).get("operator-status") or {})
+    used = ((status.get("ipam") or {}).get("used") or {})
+    released = ((status.get("ipam") or {}).get("release-ips") or {})
     return {
         "apiVersion": item.get("apiVersion"),
         "kind": item.get("kind", "CiliumNode"),
         "metadata": _metadata(item.get("metadata"), ALLOWED_NODE_LABELS),
+        "spec": {
+            "ipamPoolCount": len(((spec.get("ipam") or {}).get("pools") or {}).get("allocated") or []),
+            "addressesCount": len(spec.get("addresses") or []),
+        },
         "status": {
             "conditions": _conditions(status.get("conditions")),
             "health": str(status.get("health", ""))[:4096] if status.get("health") is not None else None,
             "ipam": {
+                "usedCount": len(used),
+                "releaseCount": len(released),
                 "operatorStatus": {
                     "error": str(operator_status.get("error", ""))[:4096],
                 }
@@ -760,6 +859,34 @@ class KubectlCollector:
             "data": projector(diagnostic_text),
         }
 
+    def _first_json_source(self, source_id, candidates, projector, required=False):
+        """Collect the first available well-known object without guessing a distribution."""
+        attempts = []
+        last = None
+        for namespace, name in candidates:
+            result = self._json_source(
+                source_id,
+                ["get", "configmap", name, "--namespace", namespace, "-o", "json"],
+                projector,
+                required,
+            )
+            attempts.append(
+                {
+                    "namespace": namespace,
+                    "name": name,
+                    "status": result.get("status"),
+                    "error": result.get("error"),
+                }
+            )
+            last = result
+            if result.get("status") == "collected":
+                result["discovered_at"] = "{0}/{1}".format(namespace, name)
+                result["attempts"] = attempts
+                return result
+        last = last or {"id": source_id, "status": "unsupported", "required": required}
+        last["attempts"] = attempts
+        return last
+
     def collect(self, system_namespaces, application_namespaces, collect_logs, log_tail_lines, max_log_pods, max_log_bytes):
         sources = {}
         specifications = (
@@ -799,9 +926,9 @@ class KubectlCollector:
             readyz_future = executor.submit(self._text_source, "api_readyz", ["get", "--raw=/readyz?verbose"], project_readyz)
             futures[readyz_future] = ("api_readyz", True)
             cilium_config_future = executor.submit(
-                self._json_source,
+                self._first_json_source,
                 "cilium_config",
-                ["get", "configmap", "cilium-config", "--namespace", "kube-system", "-o", "json"],
+                CONFIGMAP_CANDIDATES["cilium_config"],
                 lambda value: {
                     "metadata": _metadata(value.get("metadata")),
                     "data": {key: (value.get("data") or {}).get(key) for key in ALLOWED_CILIUM_CONFIG_KEYS if key in (value.get("data") or {})},
@@ -810,9 +937,9 @@ class KubectlCollector:
             )
             futures[cilium_config_future] = ("cilium_config", False)
             coredns_config_future = executor.submit(
-                self._json_source,
+                self._first_json_source,
                 "coredns_config",
-                ["get", "configmap", "coredns", "--namespace", "kube-system", "-o", "json"],
+                CONFIGMAP_CANDIDATES["coredns_config"],
                 project_coredns_config,
                 False,
             )

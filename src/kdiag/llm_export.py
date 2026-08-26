@@ -148,7 +148,168 @@ class _EvidenceRegistry:
         return {token: reference for reference, token in self._by_reference.items()}
 
 
-def _component_versions(facts, findings):
+def _bounded_value(value, depth=0):
+    if depth >= 3:
+        return "<nested>"
+    if isinstance(value, str):
+        return _clean_text(value, 2048)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        return [_bounded_value(item, depth + 1) for item in value[:20]]
+    if isinstance(value, dict):
+        return {str(key)[:128]: _bounded_value(item, depth + 1) for key, item in list(sorted(value.items()))[:20]}
+    return _clean_text(value, 512)
+
+
+def _fragment_excerpt(value):
+    if isinstance(value, str):
+        return _clean_text(value, 2048)
+    if isinstance(value, dict):
+        for key in ("message", "note", "error", "reason", "stdout", "text"):
+            if value.get(key):
+                return _clean_text(value.get(key), 2048)
+    return _clean_text(json.dumps(_bounded_value(value), ensure_ascii=False, sort_keys=True), 2048)
+
+
+def _fragment_timestamp(value):
+    if not isinstance(value, dict):
+        return None
+    for key in ("timestamp", "lastTransitionTime", "seriesLastObservedTime", "lastTimestamp", "eventTime", "finishedAt", "startedAt"):
+        if value.get(key):
+            return _clean_text(value.get(key), 128)
+    return None
+
+
+class _EvidenceResolver:
+    def __init__(self, collection_root, collection, normalized):
+        self.root = Path(collection_root).resolve()
+        self.normalized = normalized
+        self.files = {
+            "normalized-events.json.gz": self.root / "normalized-events.json.gz",
+        }
+        for item in collection.get("nodes", []) or []:
+            if item.get("file"):
+                path = self._safe_path(item["file"])
+                self.files[Path(item["file"]).name] = path
+                self.files["node-{0}.json.gz".format(item.get("host"))] = path
+        for key in ("kubernetes", "prometheus"):
+            item = collection.get(key, {}) or {}
+            if item.get("file"):
+                path = self._safe_path(item["file"])
+                self.files[Path(item["file"]).name] = path
+                self.files["{0}.json.gz".format(key)] = path
+        self.documents = {"normalized-events.json.gz": normalized}
+        self.events = {event.get("evidence"): event for event in normalized.get("events", []) or [] if event.get("evidence")}
+
+    def _safe_path(self, relative):
+        if not isinstance(relative, str) or not relative or os.path.isabs(relative):
+            raise ValueError("invalid evidence member")
+        candidate = (self.root / relative).resolve()
+        if os.path.commonpath((str(self.root), str(candidate))) != str(self.root):
+            raise ValueError("evidence member escapes collection")
+        return candidate
+
+    def _document(self, filename):
+        if filename in self.documents:
+            return self.documents[filename]
+        path = self.files.get(filename)
+        if path is None or path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024 * 1024:
+            return None
+        document = load_gzip_json(path)
+        if isinstance(document, dict):
+            self.documents[filename] = document
+            return document
+        return None
+
+    @staticmethod
+    def _descend(value, token):
+        if isinstance(token, int):
+            return value[token] if isinstance(value, list) and token < len(value) else None
+        if isinstance(value, dict):
+            if token in value:
+                return value[token]
+            data = value.get("data")
+            if isinstance(data, dict) and token in data:
+                return data[token]
+        if isinstance(value, list):
+            return next((item for item in value if isinstance(item, dict) and item.get("id") == token), None)
+        return None
+
+    def resolve(self, evidence_id, reference, external=False):
+        event = self.events.get(reference)
+        if event:
+            fragment = {
+                "evidence_id": evidence_id,
+                "source_type": _clean_text(event.get("source"), 128),
+                "status": "collected",
+                "value": _bounded_value({"categories": event.get("categories"), "reason": event.get("reason")}),
+                "excerpt": _clean_text(event.get("message_excerpt"), 2048),
+                "timestamp": event.get("timestamp"),
+                "truncated": bool(event.get("message_truncated")),
+            }
+            if not external:
+                fragment["reference"] = reference
+            return fragment
+        filename, separator, fragment_path = str(reference).partition("#")
+        document = self._document(filename)
+        if document is None:
+            result = {"evidence_id": evidence_id, "source_type": "unavailable", "status": "unavailable", "value": None, "excerpt": "", "timestamp": None, "truncated": False}
+            if not external:
+                result["reference"] = reference
+            return result
+        if not separator or not fragment_path:
+            value = {key: document.get(key) for key in ("kind", "status", "schema_version") if key in document}
+            result = {
+                "evidence_id": evidence_id,
+                "source_type": "node" if filename.startswith("node-") else filename.split(".", 1)[0],
+                "status": document.get("status") or "collected",
+                "value": value,
+                "excerpt": _fragment_excerpt(value),
+                "timestamp": None,
+                "truncated": document.get("status") == "truncated",
+            }
+            if not external:
+                result["reference"] = reference
+            return result
+        line_number = None
+        line_match = re.search(r":line-(\d+)$", fragment_path)
+        if line_match:
+            line_number = int(line_match.group(1))
+            fragment_path = fragment_path[:line_match.start()]
+        tokens = []
+        for match in re.finditer(r"(?:^|\.)([^.\[\]]+)|\[(\d+)\]", fragment_path):
+            tokens.append(int(match.group(2)) if match.group(2) is not None else match.group(1))
+        value = document
+        status = "collected"
+        for token in tokens:
+            value = self._descend(value, token)
+            if value is None:
+                status = "unavailable"
+                break
+            if isinstance(value, dict) and value.get("status"):
+                status = value.get("status")
+        if line_number is not None and isinstance(value, dict):
+            text = value.get("stdout") if value.get("stdout") is not None else value.get("text")
+            lines = str(text or "").splitlines()
+            value = lines[line_number - 1] if 0 < line_number <= len(lines) else None
+            if value is None:
+                status = "unavailable"
+        result = {
+            "evidence_id": evidence_id,
+            "source_type": "node" if filename.startswith("node-") else filename.split(".", 1)[0],
+            "status": status,
+            "value": _bounded_value(value),
+            "excerpt": _fragment_excerpt(value) if value is not None else "",
+            "timestamp": _fragment_timestamp(value),
+            "truncated": status == "truncated" or bool(isinstance(value, dict) and value.get("truncated")),
+        }
+        if not external:
+            result["reference"] = reference
+        return result
+
+
+def _component_versions(facts, findings, normalized=None, kubernetes=None):
     values = {}
 
     def add(name, version=None):
@@ -161,6 +322,18 @@ def _component_versions(facts, findings):
             add("RED OS", node.get("os"))
         if node.get("kernel"):
             add("Linux kernel", node.get("kernel"))
+    for node in (kubernetes or {}).get("sources", {}).get("nodes", {}).get("data", {}).get("items", []) or []:
+        node_info = (node.get("status") or {}).get("nodeInfo", {}) or {}
+        add("kubelet", node_info.get("kubeletVersion"))
+        add("containerd", node_info.get("containerRuntimeVersion"))
+    for pod in (kubernetes or {}).get("sources", {}).get("pods", {}).get("data", {}).get("items", []) or []:
+        for container in (pod.get("spec") or {}).get("containers", []) or []:
+            name = str(container.get("name") or "").lower()
+            image = str(container.get("image") or "")
+            for needle, canonical in ALLOWED_COMPONENTS.items():
+                if needle.lower() in name or needle.lower() in image.lower():
+                    match = VERSION_RE.search(image)
+                    add(canonical, match.group(0) if match else None)
     texts = []
     for finding in findings:
         texts.extend(
@@ -168,6 +341,8 @@ def _component_versions(facts, findings):
             + list(finding.get("alternatives", []) or [])
             + list(finding.get("counter_evidence", []) or [])
         )
+    for event in (normalized or {}).get("events", []) or []:
+        texts.extend((event.get("component"), event.get("message_excerpt")))
     for raw_text in texts:
         text = str(raw_text or "")
         lowered = text.lower()
@@ -191,7 +366,11 @@ def _finding_projection(findings, registry):
                 "rule_id": _clean_text(finding.get("rule_id"), 256),
                 "severity": _clean_text(finding.get("severity"), 32),
                 "classification": _clean_text(finding.get("classification"), 32),
+                "detection_confidence": _clean_text(finding.get("detection_confidence"), 32),
                 "causal_confidence": _clean_text(finding.get("causal_confidence"), 32),
+                "version_scope": _clean_text(finding.get("version_scope"), 512),
+                "started_at": _clean_text(finding.get("started_at"), 128),
+                "ended_at": _clean_text(finding.get("ended_at"), 128),
                 "title": _clean_text(finding.get("title"), 512),
                 "summary": _clean_text(finding.get("summary"), 2048),
                 "affected": [_clean_text(value, 512) for value in (finding.get("affected", []) or [])[:50]],
@@ -216,6 +395,7 @@ def _event_projection(normalized, registry):
         result.append(
             {
                 "event_id": "EVENT_{0:03d}".format(index),
+                "timestamp": _clean_text(event.get("timestamp"), 128),
                 "time_offset_seconds": int(epoch - first_epoch) if first_epoch is not None and isinstance(epoch, (int, float)) else None,
                 "source_type": _clean_text(event.get("source"), 128),
                 "scope": {
@@ -228,6 +408,8 @@ def _event_projection(normalized, registry):
                 "severity": _clean_text(event.get("severity"), 32),
                 "categories": [_clean_text(value, 128) for value in (event.get("categories", []) or [])[:20]],
                 "message_excerpt": _clean_text(event.get("message_excerpt"), 2048),
+                "occurrence_count": int(event.get("occurrence_count") or 1),
+                "timestamp_inferred": bool(event.get("timestamp_inferred")),
                 "evidence_id": registry.get(event.get("evidence")),
             }
         )
@@ -241,11 +423,15 @@ def _correlation_projection(normalized, registry):
         result.append(
             {
                 "id": "CORRELATION_{0:03d}".format(index),
+                "episode_id": _clean_text(item.get("episode_id"), 128),
                 "type": _clean_text(item.get("correlation_id"), 256),
                 "scope": _clean_text(item.get("scope"), 512),
                 "categories": [_clean_text(value, 128) for value in (item.get("categories", []) or [])[:20]],
                 "source_types": [_clean_text(value, 128) for value in (item.get("sources", []) or [])[:20]],
                 "window_seconds": item.get("window_seconds"),
+                "started_at": _clean_text(item.get("started_at"), 128),
+                "ended_at": _clean_text(item.get("ended_at"), 128),
+                "duration_seconds": item.get("duration_seconds"),
                 "evidence_ids": [value for value in evidence_ids if value],
             }
         )
@@ -268,9 +454,17 @@ def _unknown_projection(normalized):
     return result
 
 
-def _build_package(collection, facts, report, normalized, profile, mode, question):
+def _build_package(collection, facts, report, normalized, profile, mode, question, resolver=None):
     registry = _EvidenceRegistry()
     findings = _finding_projection(report.get("findings", []) or [], registry)
+    events = _event_projection(normalized, registry)
+    correlations = _correlation_projection(normalized, registry)
+    fragments = []
+    if resolver is not None:
+        fragments = [
+            resolver.resolve(evidence_id, reference, external=profile == "external")
+            for evidence_id, reference in sorted(registry.private_map().items())
+        ]
     package = {
         "schema_version": LLM_SCHEMA_VERSION,
         "kind": "kdiag_llm_incident",
@@ -287,11 +481,12 @@ def _build_package(collection, facts, report, normalized, profile, mode, questio
             "collection_status": _clean_text(collection.get("status"), 64),
             "node_count": len(collection.get("nodes", []) or []),
         },
-        "components": _component_versions(facts, report.get("findings", []) or []),
+        "components": _component_versions(facts, report.get("findings", []) or [], normalized, resolver._document("kubernetes.json.gz") if resolver else None),
         "coverage": _coverage_projection(report, profile == "external"),
         "findings": findings,
-        "events": _event_projection(normalized, registry),
-        "correlations": _correlation_projection(normalized, registry),
+        "events": events,
+        "correlations": correlations,
+        "evidence_fragments": fragments,
         "unknown_fingerprints": _unknown_projection(normalized),
         "normalization_stats": normalized.get("stats", {}) or {},
     }
@@ -320,7 +515,6 @@ def _blocking_secret_types(text):
         ("private_key", PEM_RE),
         ("jwt", JWT_RE),
         ("credential_assignment", PASSWORD_RE),
-        ("high_entropy_base64", BASE64_SECRET_RE),
         ("high_entropy_base64", BASE64_SECRET_RE),
     ):
         if pattern.search(text):
@@ -357,12 +551,46 @@ class _Pseudonymizer:
             component = _clean_text(event.get("component"), 512)
             if component and component.lower() not in {value.lower() for value in ALLOWED_COMPONENTS} and component.lower() not in ALLOWED_COMPONENTS:
                 self.add("COMPONENT", component)
+        self._discover_structured(package)
         for text in _iter_strings(package):
             for kind, pattern in CONTEXT_IDENTIFIER_PATTERNS:
                 for match in pattern.finditer(text):
                     candidate = match.group(1).rstrip(".,:;)")
                     if candidate.lower() not in ALLOWED_COMPONENTS and candidate.lower() not in CONTEXT_STOP_WORDS:
                         self.add(kind, candidate)
+
+    def _discover_structured(self, value, context=None):
+        if isinstance(value, list):
+            for item in value:
+                self._discover_structured(item, context)
+            return
+        if not isinstance(value, dict):
+            return
+        kind = str(value.get("kind") or context or "").lower()
+        metadata = value.get("metadata")
+        if isinstance(metadata, dict):
+            self.add("NAMESPACE", metadata.get("namespace"))
+            token_kind = {
+                "node": "NODE",
+                "pod": "POD",
+                "service": "SERVICE",
+                "serviceaccount": "ACCOUNT",
+            }.get(kind)
+            if token_kind:
+                self.add(token_kind, metadata.get("name"))
+        for key, item in value.items():
+            lower_key = str(key).lower()
+            if lower_key == "namespace":
+                self.add("NAMESPACE", item)
+            elif lower_key in ("pod", "podname"):
+                self.add("POD", item)
+            elif lower_key in ("node", "nodename", "hostname", "host"):
+                self.add("NODE", item)
+            elif lower_key in ("serviceaccount", "serviceaccountname", "user", "username", "account"):
+                self.add("ACCOUNT", item)
+            elif lower_key in ("service", "servicename") and isinstance(item, str):
+                self.add("SERVICE", item)
+            self._discover_structured(item, kind)
 
     def _substitute_known(self, text):
         result = text
@@ -446,8 +674,8 @@ def _dlp_findings(text, known_values=()):
 def _trim_package(package, max_bytes):
     if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 16 * 1024 or max_bytes > MAX_PACKAGE_BYTES:
         raise ValueError("max_package_bytes must be between 16384 and {0}".format(MAX_PACKAGE_BYTES))
-    trimmed = {"events": 0, "correlations": 0, "unknown_fingerprints": 0}
-    for key in ("unknown_fingerprints", "events", "correlations"):
+    trimmed = {"events": 0, "correlations": 0, "unknown_fingerprints": 0, "evidence_fragments": 0}
+    for key in ("unknown_fingerprints", "events", "correlations", "evidence_fragments"):
         while len(_incident_bytes(package)) > max_bytes and package[key]:
             package[key].pop()
             trimmed[key] += 1
@@ -536,7 +764,8 @@ def prepare_llm_export(collection_dir, output_dir, profile, mode, question, max_
     if not isinstance(normalized, dict):
         raise ValueError("normalized-events root must be an object")
 
-    package, registry = _build_package(collection, facts, report, normalized, profile, mode, question)
+    resolver = _EvidenceResolver(collection_root, collection, normalized)
+    package, registry = _build_package(collection, facts, report, normalized, profile, mode, question, resolver)
     for text in _iter_strings(package):
         blockers = _blocking_secret_types(text)
         if profile == "external" and blockers:

@@ -16,8 +16,10 @@
 - an SHA-256 manifest, JSON report, and Markdown report;
 - an autonomous rule pack for Node Problem Detector signatures, Pod lifecycle/rollouts/PDB, Service/CoreDNS/EndpointSlice, Prometheus, control-plane/etcd capacity, storage/CSI, runtime/Cilium, version skew, resources, time, and certificates;
 - kube-proxy-free Cilium diagnostics based on the effective replacement setting and read-only per-node Cilium service maps; absence of kube-proxy alone is not an error;
-- findings classified as `fact`, `correlation`, or `hypothesis`, normalized events, and fingerprints for unknown messages.
-- optional minimized local LLM packages and fail-closed pseudonymized packages for a manually operated external LLM.
+- findings classified as `fact`, `correlation`, or `hypothesis`, normalized events, and fingerprints for unknown messages;
+- per-command, per-Pod-log, and per-Kubernetes-source coverage plus a rule evaluation ledger with `matched`, `not_matched`, `unknown`, and `not_applicable` states;
+- evidence cards with bounded excerpts, counter-evidence, missing checks, collection/correlation windows, and a correlation timeline;
+- optional minimized local LLM packages with selected evidence fragments and fail-closed pseudonymized packages for a manually operated external LLM.
 
 For detailed operating instructions, see the [English User Guide](docs/UserGuide.md) or the [Russian User Guide](docs/UserGuide-ru.md).
 
@@ -38,7 +40,7 @@ On the management server:
 - a dedicated read-only kubeconfig for the collector;
 - a writable `--output-dir`; create it in advance with mode `0700` on the management server's local filesystem.
 
-An example identity and permissions are provided in the [RBAC manifest](deploy/kubernetes/kdiag-rbac.yaml). It is not applied automatically. Access to `pods/log` is granted only in `kube-system`; create a separate namespace-scoped Role and RoleBinding based on this example for every approved application namespace.
+An example identity and permissions are provided in the [RBAC manifest](deploy/kubernetes/kdiag-rbac.yaml). It is not applied automatically. Access to `pods/log` is granted in `kube-system`, `d8-kube-dns`, and `d8-cni-cilium`; create a separate namespace-scoped Role and RoleBinding for every approved application namespace.
 
 Step-by-step creation of a dedicated kubeconfig for the `kdiag-system/kdiag-reader` ServiceAccount, including short-lived token issuance and renewal, is documented under [Kubernetes identity and RBAC](docs/UserGuide.md#6-kubernetes-identity-and-rbac) in the User Guide.
 
@@ -128,7 +130,7 @@ Every run creates a separate directory:
   manifest.json
 ```
 
-`report.md` starts with a coverage matrix and explicitly shows unavailable sources. Rebuild derived output with:
+`report.md` starts with a coverage matrix and explicitly shows unavailable, failed, timed-out, and truncated inner checks even when their parent bundle was collected. The rule ledger distinguishes a clean non-match from `unknown` caused by missing evidence and from `not_applicable`. Rebuild derived output with:
 
 ```bash
 python3.8 dist/kdiag.pyz report /var/lib/kdiag/<collection-id>
@@ -152,7 +154,7 @@ python3.8 dist/kdiag.pyz rules list
 python3.8 dist/kdiag.pyz rules explain kubernetes.node_not_ready
 ```
 
-`normalized-events.json.gz` contains categorized events, correlations, and bounded approximate heavy hitters for unknown fingerprints. Original messages remain confidential evidence; do not transfer this file outside the trusted environment without a separate redaction review.
+`normalized-events.json.gz` contains deduplicated categorized events, independent scoped correlation episodes, explicit truncation/drop counters by source, and bounded approximate heavy hitters for unknown fingerprints. Original messages remain confidential evidence; do not transfer this file outside the trusted environment without a separate redaction review.
 
 Snapshot exit codes:
 
@@ -182,7 +184,7 @@ python3.8 dist/kdiag.pyz llm analyze-local /secure/kdiag-llm-local/prepared \
   --output-dir /secure/kdiag-llm-local-response
 ```
 
-`analyze-local` sends the prepared JSON content, not the collection path, and never executes model suggestions. `kdiag.pyz` does not bundle or configure a model/runtime.
+`analyze-local` sends the prepared JSON content, not the collection path, and never executes model suggestions. The package contains bounded `status/value/excerpt/timestamp` fragments for its `EVIDENCE_NNN` identifiers instead of opaque identifiers alone. `kdiag.pyz` does not bundle or configure a model/runtime.
 
 A hardened llama.cpp systemd deployment example is available in [deploy/systemd](deploy/systemd/README.md). New local preparations use `prepared/`; `analyze-local` also accepts legacy local `export/` directories created by kdiag 0.5.0.
 

@@ -1,7 +1,9 @@
 import json
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import kdiag.normalize as normalize_module
 from kdiag.normalize import classify_message, correlate_events, normalize_evidence
 
 
@@ -13,6 +15,24 @@ class NormalizeTest(unittest.TestCase):
         categories = classify_message("write /sys/fs/cgroup/x/io.max: operation not permitted")
         self.assertIn("cgroup_access_denied", categories)
         self.assertIn("timeout", classify_message("context deadline exceeded"))
+
+    def test_classification_rejects_node_and_dns_signatures_in_unrelated_logs(self):
+        self.assertNotIn(
+            "cgroup_access_denied",
+            classify_message("cgroup write: operation not permitted", source="cri_log", component="application"),
+        )
+        self.assertNotIn(
+            "npd_ext4_error",
+            classify_message("EXT4-fs error (device demo)", source="kubernetes_pod_log", component="application"),
+        )
+        self.assertNotIn(
+            "dns_servfail",
+            classify_message("request returned SERVFAIL", source="kubernetes_pod_log", component="application"),
+        )
+        self.assertIn(
+            "dns_servfail",
+            classify_message("request returned SERVFAIL", source="kubernetes_pod_log", component="coredns"),
+        )
 
     def test_pinned_npd_signatures_are_classified(self):
         cases = {
@@ -121,6 +141,8 @@ class NormalizeTest(unittest.TestCase):
         self.assertNotIn("cgroup_access_denied", categories)
         self.assertNotIn("cgroup_service_failure", correlation_ids)
         self.assertGreater(normalized["stats"]["cgroup_events_suppressed"], 0)
+        for event in normalized["events"]:
+            self.assertNotIn("read_only_fs", event["categories"])
 
     def test_one_record_cannot_correlate_with_itself(self):
         event = {
@@ -134,6 +156,117 @@ class NormalizeTest(unittest.TestCase):
             "evidence": "synthetic#one",
         }
         self.assertEqual([], correlate_events([event]))
+
+    def test_all_inferred_timestamps_are_excluded_from_correlations(self):
+        events = [
+            self._correlation_event("one", 1, ["probe_failure"], pod="pod-a", inferred=True),
+            self._correlation_event("two", 2, ["timeout"], pod="pod-a"),
+        ]
+        self.assertEqual([], correlate_events(events))
+
+    def test_probe_correlation_is_scoped_to_pod(self):
+        events = [
+            self._correlation_event("one", 1, ["probe_failure"], pod="pod-a"),
+            self._correlation_event("two", 2, ["timeout"], pod="pod-b"),
+        ]
+        self.assertEqual([], correlate_events(events))
+
+    def test_node_correlation_is_scoped_to_node(self):
+        events = [
+            self._correlation_event("one", 1, ["node_not_ready"], node="node-a"),
+            self._correlation_event("two", 2, ["runtime_unavailable"], node="node-b"),
+        ]
+        self.assertEqual([], correlate_events(events))
+
+    def test_correlation_emits_independent_episodes_with_timing(self):
+        events = []
+        for prefix, start in (("first", 10), ("second", 2000)):
+            events.extend(
+                (
+                    self._correlation_event(prefix + "-probe", start, ["probe_failure"], pod="pod-a"),
+                    self._correlation_event(prefix + "-timeout", start + 5, ["timeout"], pod="pod-a"),
+                )
+            )
+        episodes = [item for item in correlate_events(events) if item["correlation_id"] == "probe_network_failure"]
+        self.assertEqual(2, len(episodes))
+        self.assertEqual([5.0, 5.0], [item["duration_seconds"] for item in episodes])
+        self.assertTrue(all(item["episode_id"] for item in episodes))
+        self.assertEqual(2, len({item["episode_id"] for item in episodes}))
+
+    @staticmethod
+    def _correlation_event(event_id, timestamp, categories, node="node-1", pod=None, inferred=False):
+        return {
+            "event_id": event_id,
+            "timestamp": "2026-01-01T00:{0:02d}:00Z".format(timestamp % 60),
+            "timestamp_epoch": float(timestamp),
+            "timestamp_inferred": inferred,
+            "node": node,
+            "namespace": "demo" if pod else None,
+            "pod": pod,
+            "categories": categories,
+            "source": "synthetic",
+            "evidence": "synthetic#" + event_id,
+        }
+
+    def test_normalization_deduplicates_and_serializes_stats(self):
+        duplicate = json.dumps(
+            {
+                "MESSAGE": "context deadline exceeded",
+                "_SYSTEMD_UNIT": "kubelet.service",
+                "__REALTIME_TIMESTAMP": "1767225600000000",
+            }
+        )
+        nodes = {
+            "node-1": {
+                "ended_at": "2026-01-01T00:10:00Z",
+                "commands": [{"id": "journal_services_current", "stdout": duplicate + "\n" + duplicate}],
+                "pod_logs": {"entries": []},
+                "facts": {"service_states": {}},
+            }
+        }
+        normalized = normalize_evidence({"collection_id": "duplicates"}, nodes, {})
+        self.assertEqual(1, len(normalized["events"]))
+        self.assertEqual(2, normalized["events"][0]["occurrence_count"])
+        self.assertEqual(1, normalized["stats"]["deduplicated_records"])
+        json.dumps(normalized)
+
+    def test_output_limit_round_robins_between_sources(self):
+        journal = "\n".join(
+            json.dumps(
+                {
+                    "MESSAGE": "context deadline exceeded token-{0}".format(index),
+                    "_SYSTEMD_UNIT": "kubelet.service",
+                    "__REALTIME_TIMESTAMP": str(1767225600000000 + index * 1000000),
+                }
+            )
+            for index in range(3)
+        )
+        nodes = {
+            "node-1": {
+                "ended_at": "2026-01-01T00:10:00Z",
+                "commands": [{"id": "journal_services_current", "stdout": journal}],
+                "pod_logs": {"entries": []},
+                "facts": {"service_states": {}},
+            }
+        }
+        kubernetes = {
+            "collected_at": "2026-01-01T00:10:00Z",
+            "logs": {
+                "entries": [
+                    {
+                        "namespace": "demo",
+                        "pod": "pod-a",
+                        "container": "app",
+                        "text": "2026-01-01T00:00:00Z context deadline exceeded from pod",
+                    }
+                ]
+            },
+        }
+        with mock.patch.object(normalize_module, "MAX_NORMALIZED_EVENTS", 2):
+            normalized = normalize_evidence({"collection_id": "limited"}, nodes, kubernetes)
+        self.assertEqual({"journal", "kubernetes_pod_log"}, {event["source"] for event in normalized["events"]})
+        self.assertEqual(2, normalized["stats"]["output_limit_drops"])
+        self.assertTrue(normalized["stats"]["truncated"])
 
     def test_runtime_state_ignores_missing_and_inactive_alternative_units(self):
         nodes = {

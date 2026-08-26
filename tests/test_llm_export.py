@@ -163,6 +163,10 @@ class LLMExportTest(unittest.TestCase):
                 self.assertNotIn(forbidden, export_text)
             self.assertIn("Cilium", export_text)
             self.assertIn("v1.14.6", export_text)
+            external_incident = json.loads((destination / "export" / "incident.external.json").read_text(encoding="utf-8"))
+            self.assertTrue(external_incident["evidence_fragments"])
+            self.assertEqual("EVIDENCE_001", external_incident["evidence_fragments"][0]["evidence_id"])
+            self.assertIn("ADDR_", external_incident["evidence_fragments"][0]["excerpt"])
             self.assertEqual("passed", validate_external_export(destination / "export")["status"])
             self.assertTrue(result["token_map"].is_file())
             self.assertEqual(0o600, result["token_map"].stat().st_mode & 0o777)
@@ -187,6 +191,11 @@ class LLMExportTest(unittest.TestCase):
             self.assertIn("node-a.internal.example", incident)
             self.assertIn("api-pod-7d9", incident)
             self.assertNotIn("ssh 10.10.0.12 failed", incident)
+            package = json.loads(incident)
+            fragment = package["evidence_fragments"][0]
+            self.assertEqual("collected", fragment["status"])
+            self.assertIn("connect 10.10.0.12:8443", fragment["excerpt"])
+            self.assertIn("node-node-a.internal.example.json.gz", fragment["reference"])
 
     def test_canary_secret_blocks_external_export(self):
         with tempfile.TemporaryDirectory() as directory:

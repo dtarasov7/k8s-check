@@ -6,7 +6,7 @@ skinparam shadowing false
 
 actor "Incident operator" as Operator
 database "Confidential kdiag collection\nraw node and Kubernetes evidence" as Collection
-component "kdiag LLM preparation\nminimization, pseudonymization, DLP" as Kdiag
+component "kdiag LLM preparation\nbounded fragments, pseudonymization, DLP" as Kdiag
 folder "Local incident package\nidentifiers retained" as LocalPackage
 folder "External export\nincident, prompt, preview, manifest" as ExternalExport
 folder "Private mapping\nmode 0600" as TokenMap
@@ -14,10 +14,10 @@ cloud "Separate local inference service\nno cluster credentials or tools" as Loc
 cloud "Google AI Search\nmanual operation only" as Google
 
 Operator --> Kdiag : prepare and validate
-Kdiag --> Collection : read derived evidence
-Kdiag --> LocalPackage : local profile
+Kdiag --> Collection : resolve selected evidence references
+Kdiag --> LocalPackage : IDs plus bounded evidence fragments
 LocalPackage ..> LocalLLM : loopback HTTP content transfer
-Kdiag --> ExternalExport : external profile after DLP
+Kdiag --> ExternalExport : pseudonymized fragments after DLP
 Kdiag --> TokenMap : original values stay local
 Operator --> ExternalExport : review every exported file
 Operator --> Google : manually copy reviewed export

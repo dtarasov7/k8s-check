@@ -6,14 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-26
+
 ### Added
 
+- Added per-node-command, node/Kubernetes Pod-log, and Kubernetes-source coverage plus a 96-rule evaluation ledger with matched, not-matched, unknown, and not-applicable states.
+- Added bounded evidence cards, independent scoped correlation episodes with timing, fair event limiting, deduplication, source drop counters, inventory/Node mismatch detection, and normalization-truncation findings.
+- Added Deckhouse CSE Pro 1.74 discovery for Cilium/CoreDNS ConfigMaps and log namespaces with vanilla fallbacks; kube-proxy remains optional.
+- Local and external LLM packages now contain bounded status/value/excerpt/timestamp evidence fragments; external fragments are pseudonymized and DLP-checked while token/evidence maps remain private.
+- CoreDNS resolution findings now list up to 20 unique failed query names with query type and occurrence count; source line references remain as evidence.
 - Added `collection.collect_cgroup=false` and `--skip-cgroup`: direct cgroup facts are not collected, cgroup events/correlations and related findings are suppressed, and the selected mode is recorded in collections and reports.
 - Added disableable `--progress off|summary|detail` execution visualization on `stderr`, covering phases, per-node state, node evidence categories, and Kubernetes API source statuses.
 - Added Deckhouse `containerd-deckhouse.service` support alongside vanilla `containerd.service` and `crio.service`; expanded the rule-pack scope to Kubernetes 1.24–1.31.
 
 ### Fixed
 
+- Removed false positives from old rotated kubelet client certificates, normal StatefulSet rollout revision drift, active Job retries, empty CoreDNS container-status arrays, filtered Service selectors, absent Cilium source coverage, empty-but-collected Cilium service maps, per-interface IPv6 disables, and version-skew boundary selection.
+- All inferred timestamps are excluded from causal correlation, and `collect_cgroup=false` suppresses complete cgroup-derived events including EROFS/read-only labels.
+- Read-only EROFS/container snapshot mounts below the containerd data directory are no longer reported as full runtime filesystems; the check now evaluates only separate backing mount points for runtime, kubelet, and logs.
 - Runtime units with `LoadState=not-found` no longer produce `runtime_unavailable` or `node.runtime_inactive`; an inactive alternative runtime is ignored while another loaded runtime is working.
 - Static systemd state no longer gains artificial temporal causality in 15-minute correlations; temporal correlation now requires an actual timestamped event.
 

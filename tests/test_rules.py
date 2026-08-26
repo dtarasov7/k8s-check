@@ -77,7 +77,7 @@ class RulesTest(unittest.TestCase):
         expected = {
             "correlation.probe_network_failure", "correlation.storage_failure", "storage.volume_operation_failure",
             "kubernetes.init_container_failed", "kubernetes.container_exit_nonzero", "kubernetes.pod_evicted", "kubernetes.pod_restart_storm",
-            "kubernetes.deployment_rollout_failed", "kubernetes.daemonset_misscheduled", "kubernetes.statefulset_rollout_stalled", "kubernetes.job_failed",
+            "kubernetes.deployment_rollout_failed", "kubernetes.daemonset_misscheduled", "kubernetes.job_failed",
             "pdb.insufficient_healthy", "pdb.disruption_blocked", "runtime.cri_not_ready", "runtime.cri_network_not_ready", "node.swap_active", "node.low_runtime_disk",
             "dns.nameserver_limit_exceeded", "dns.coredns_config_empty", "certificate.kubelet_rotation_broken", "inventory.unsupported_version_skew",
             "prometheus.alert_firing", "prometheus.config_reload_failed", "prometheus.corruption_detected",
@@ -150,6 +150,81 @@ class RulesTest(unittest.TestCase):
         rule_ids = {item["rule_id"] for item in evaluate_rules({"nodes": []}, {}, kubernetes)}
         self.assertNotIn("inventory.unsupported_version_skew", rule_ids)
 
+    def test_version_skew_uses_newest_and_oldest_apiserver_boundaries(self):
+        def evidence(kubelet_version):
+            return {
+                "sources": {
+                    "nodes": {"status": "collected", "data": {"items": [{"metadata": {"name": "node-1"}, "status": {"nodeInfo": {"kubeletVersion": kubelet_version}}}]}},
+                    "pods": {
+                        "status": "collected",
+                        "data": {
+                            "items": [
+                                {"metadata": {"namespace": "kube-system", "name": "kube-apiserver-a"}, "spec": {"containers": [{"name": "kube-apiserver", "image": "kube-apiserver:v1.30.9"}]}},
+                                {"metadata": {"namespace": "kube-system", "name": "kube-apiserver-b"}, "spec": {"containers": [{"name": "kube-apiserver", "image": "kube-apiserver:v1.31.4"}]}},
+                            ]
+                        },
+                    },
+                }
+            }
+
+        allowed = {item["rule_id"] for item in evaluate_rules({"nodes": []}, {}, evidence("v1.28.12"))}
+        self.assertIn("inventory.mixed_apiserver_versions", allowed)
+        self.assertNotIn("inventory.unsupported_version_skew", allowed)
+        unsupported = {item["rule_id"] for item in evaluate_rules({"nodes": []}, {}, evidence("v1.27.16"))}
+        self.assertIn("inventory.unsupported_version_skew", unsupported)
+
+    def test_erofs_snapshot_mounts_are_not_runtime_filesystems(self):
+        snapshot = node_snapshot("6.1")
+        snapshot["commands"] = [
+            {
+                "id": "df_blocks",
+                "status": "collected",
+                "stdout": (
+                    "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                    "erofs 1024 1024 0 100% "
+                    "/var/lib/containerd/io.containerd.snapshotter.v1.erofs/"
+                    "snapshots/42/k8s.mountpoints/rootfs\n"
+                ),
+            }
+        ]
+        collection = {"nodes": [{"host": "node-1", "status": "collected"}]}
+        rule_ids = {item["rule_id"] for item in evaluate_rules(collection, {"node-1": snapshot}, {})}
+        self.assertNotIn("node.low_runtime_disk", rule_ids)
+
+        snapshot["commands"][0]["stdout"] += "/dev/vdb 100 95 5 95% /var/lib\n"
+        rule_ids = {item["rule_id"] for item in evaluate_rules(collection, {"node-1": snapshot}, {})}
+        self.assertIn("node.low_runtime_disk", rule_ids)
+
+    def test_coredns_finding_summarizes_failed_queries(self):
+        kubernetes = {
+            "collected_at": "2026-01-01T00:10:00Z",
+            "sources": {},
+            "logs": {
+                "entries": [
+                    {
+                        "namespace": "kube-system",
+                        "pod": "coredns-test",
+                        "container": "coredns",
+                        "text": "\n".join(
+                            (
+                                "2026-01-01T00:00:01Z [ERROR] plugin/errors: 2 misspelled.svc.cluster.local. A: read udp: i/o timeout",
+                                "2026-01-01T00:00:02Z [ERROR] plugin/errors: 2 misspelled.svc.cluster.local. A: read udp: i/o timeout",
+                                '2026-01-01T00:00:03Z [INFO] client - 42 "AAAA IN wrong-name.example. udp 50 false 1232" SERVFAIL',
+                                "2026-01-01T00:00:04Z plugin/loop: Loop detected for zone .",
+                            )
+                        ),
+                    }
+                ]
+            },
+        }
+        normalized = normalize_evidence({"collection_id": "dns"}, {}, kubernetes)
+        findings = evaluate_rules({"nodes": []}, {}, kubernetes, normalized)
+        finding = next(item for item in findings if item["rule_id"] == "dns.coredns_errors")
+        self.assertIn("misspelled.svc.cluster.local [A] ×2", finding["summary"])
+        self.assertIn("wrong-name.example [AAAA] ×1", finding["summary"])
+        self.assertIn("из 3/4 событий", finding["summary"])
+        self.assertTrue(any("line-1" in value for value in finding["evidence"]))
+
     def test_disabled_cgroup_checks_produce_no_cgroup_findings(self):
         snapshot = node_snapshot("6.1")
         snapshot["facts"]["cgroup"] = {"mode": "v2", "controllers": []}
@@ -213,6 +288,86 @@ class RulesTest(unittest.TestCase):
         findings = evaluate_rules({"nodes": []}, {}, kubernetes)
         rule_ids = {item["rule_id"] for item in findings}
         self.assertNotIn("cilium.kube_proxy_replacement_disabled", rule_ids)
+
+    def test_cilium_replacement_rule_requires_pods_source(self):
+        kubernetes = {
+            "sources": {
+                "cilium_config": {"status": "collected", "data": {"data": {"kube-proxy-replacement": "false"}}},
+            }
+        }
+        rule_ids = {item["rule_id"] for item in evaluate_rules({"nodes": []}, {}, kubernetes)}
+        self.assertNotIn("cilium.kube_proxy_replacement_disabled", rule_ids)
+
+    def test_empty_collected_cilium_service_map_is_evaluated(self):
+        snapshot = node_snapshot("6.1")
+        snapshot["commands"] = [{"id": "cilium_debug_services", "status": "collected", "stdout": '{"services":[]}'}]
+        kubernetes = {
+            "sources": {
+                "services": {
+                    "status": "collected",
+                    "data": {"items": [{"metadata": {"namespace": "demo", "name": "api"}, "spec": {"type": "ClusterIP", "clusterIP": "10.0.0.1", "ports": [{"port": 443}]}}]},
+                }
+            }
+        }
+        findings = evaluate_rules({"nodes": []}, {"node-1": snapshot}, kubernetes)
+        self.assertIn("cilium.service_frontend_missing", {item["rule_id"] for item in findings})
+
+    def test_statefulset_revision_drift_and_active_job_retry_are_not_failures(self):
+        kubernetes = {
+            "sources": {
+                "workloads": {
+                    "status": "collected",
+                    "data": {
+                        "items": [
+                            {"kind": "StatefulSet", "metadata": {"namespace": "demo", "name": "db"}, "spec": {"replicas": 3}, "status": {"currentRevision": "old", "updateRevision": "new", "updatedReplicas": 1, "readyReplicas": 2}},
+                            {"kind": "Job", "metadata": {"namespace": "demo", "name": "retry"}, "status": {"failed": 2, "active": 1, "conditions": []}},
+                        ]
+                    },
+                }
+            }
+        }
+        rule_ids = {item["rule_id"] for item in evaluate_rules({"nodes": []}, {}, kubernetes)}
+        self.assertNotIn("kubernetes.statefulset_rollout_stalled", rule_ids)
+        self.assertNotIn("kubernetes.job_failed", rule_ids)
+        self.assertNotIn("kubernetes.workload_degraded", rule_ids)
+
+    def test_deckhouse_dns_requires_nonempty_ready_container_statuses(self):
+        kubernetes = {
+            "sources": {
+                "services": {"status": "collected", "data": {"items": [{"metadata": {"namespace": "d8-kube-dns", "name": "kube-dns"}, "spec": {"clusterIP": "10.0.0.10", "selectorPresent": True, "ports": []}}]}},
+                "endpoint_slices": {"status": "collected", "data": {"items": [{"metadata": {"namespace": "d8-kube-dns", "labels": {"kubernetes.io/service-name": "kube-dns"}}, "endpoints": [{"conditions": {"ready": True}}], "ports": []}]}},
+                "pods": {"status": "collected", "data": {"items": [{"metadata": {"namespace": "d8-kube-dns", "name": "coredns-a", "labels": {"app.kubernetes.io/name": "coredns"}}, "status": {"phase": "Running", "containerStatuses": []}}]}},
+            }
+        }
+        finding = next(item for item in evaluate_rules({"nodes": []}, {}, kubernetes) if item["rule_id"] == "dns.kube_dns_unavailable")
+        self.assertIn("нет Ready CoreDNS Pod", finding["summary"])
+
+    def test_selector_present_survives_allowlist_projection(self):
+        kubernetes = {
+            "sources": {
+                "services": {"status": "collected", "data": {"items": [{"metadata": {"namespace": "demo", "name": "api"}, "spec": {"type": "ClusterIP", "selector": {}, "selectorPresent": True, "ports": []}}]}},
+                "endpoint_slices": {"status": "collected", "data": {"items": []}},
+            }
+        }
+        rule_ids = {item["rule_id"] for item in evaluate_rules({"nodes": []}, {}, kubernetes)}
+        self.assertIn("kubernetes.service_no_endpoints", rule_ids)
+
+    def test_old_rotated_kubelet_client_certificate_is_ignored(self):
+        snapshot = node_snapshot("6.1")
+        snapshot["facts"]["kubelet_certificate_rotation"] = {"status": "collected", "target": "kubelet-client-current-target.pem"}
+        snapshot["facts"]["certificates"] = [
+            {"path": "/var/lib/kubelet/pki/kubelet-client-old.pem", "metadata": "notAfter=Dec 31 00:00:00 2025 GMT\n"},
+            {"path": "/var/lib/kubelet/pki/kubelet-client-current-target.pem", "metadata": "notAfter=Dec 31 00:00:00 2027 GMT\n"},
+        ]
+        collection = {"ended_at": "2026-01-01T00:00:00Z", "nodes": []}
+        rule_ids = {item["rule_id"] for item in evaluate_rules(collection, {"node-1": snapshot}, {})}
+        self.assertNotIn("certificate.expiring", rule_ids)
+
+    def test_ipv6_single_interface_disable_without_ipv6_evidence_is_ignored(self):
+        snapshot = node_snapshot("6.1")
+        snapshot["facts"]["ipv6_disable"] = {"eth0": "1", "all": "0", "default": "0"}
+        rule_ids = {item["rule_id"] for item in evaluate_rules({"nodes": []}, {"node-1": snapshot}, {})}
+        self.assertNotIn("network.ipv6_disabled", rule_ids)
 
     def test_extended_rule_pack_on_synthetic_incident(self):
         journal = (FIXTURES / "journal-synthetic.jsonl").read_text(encoding="utf-8")

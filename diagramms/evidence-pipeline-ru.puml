@@ -12,9 +12,9 @@ rectangle "Ограниченный сбор источников" as Collection
 
 database "Исходные evidence в gzip/JSON" as Raw
 component "Нормализация событий,\nклассификация и fingerprints" as Normalize
-component "Корреляция в пределах\n15 минут" as Correlate
+component "Независимые scoped episodes\nкорреляции за 15 минут" as Correlate
 component "Версионируемые\nдетерминированные правила" as Rules
-component "Coverage и извлечение\nинвентаризации узлов" as Facts
+component "Per-check coverage, ledger правил\nи инвентаризация узлов" as Facts
 component "Сборка отчёта" as Report
 database "Производные артефакты" as Derived
 component "SHA-256 manifest" as Manifest
@@ -29,6 +29,7 @@ Raw --> Rules : Структурированное состояние
 Raw --> Facts
 Rules --> Report : Факты, корреляции, гипотезы
 Facts --> Report
+Facts --> Rules : Контекст unknown / not applicable
 Normalize --> Derived : normalized-events.json.gz
 Facts --> Derived : facts.json
 Rules --> Derived : findings.json
@@ -38,7 +39,7 @@ Derived --> Manifest
 Manifest --> Derived : manifest.json
 
 note right of Rules
-Отсутствующие evidence остаются пробелом coverage
-и не превращаются в совпадение правила.
+Каждое правило: matched, not matched, unknown
+или not applicable. Inferred time не причинно.
 end note
 @enduml

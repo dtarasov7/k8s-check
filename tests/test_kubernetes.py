@@ -8,6 +8,7 @@ from kdiag.kubernetes import (
     project_api_service,
     project_cilium_endpoint,
     project_coredns_config,
+    project_event,
     project_pdb,
     project_pod,
     project_pv,
@@ -53,6 +54,22 @@ class KubernetesProjectionTest(unittest.TestCase):
         service = {"kind": "Service", "metadata": {}, "spec": {"selector": {"app": "demo", "secret": "SECRET"}}}
         self.assertNotIn("SECRET", json.dumps(project_workload(workload)))
         self.assertNotIn("SECRET", json.dumps(project_service(service)))
+        projected = project_service({"kind": "Service", "metadata": {}, "spec": {"selector": {"secret": "SECRET"}}})
+        self.assertEqual({}, projected["spec"]["selector"])
+        self.assertTrue(projected["spec"]["selectorPresent"])
+
+    def test_event_series_timestamp_and_count_are_preserved(self):
+        projected = project_event(
+            {
+                "metadata": {"name": "event", "namespace": "demo"},
+                "reason": "Failed",
+                "message": "failure",
+                "count": None,
+                "series": {"lastObservedTime": "2026-01-01T00:10:00Z", "count": 17},
+            }
+        )
+        self.assertEqual("2026-01-01T00:10:00Z", projected["seriesLastObservedTime"])
+        self.assertEqual(17, projected["count"])
 
     def test_snapshot_status_requires_all_requested_sources_and_logs(self):
         complete = {
@@ -144,6 +161,36 @@ class KubernetesProjectionTest(unittest.TestCase):
         self.assertTrue(snapshot["sources"]["volume_attachments"]["required"])
         self.assertTrue(all("get" in argv for argv in calls))
         self.assertFalse(any("exec" in argv or "apply" in argv or "delete" in argv for argv in calls))
+
+    def test_configmap_discovery_falls_back_from_deckhouse_to_vanilla(self):
+        calls = []
+
+        def fake_run(argv, timeout_seconds, max_stdout_bytes):
+            calls.append(list(argv))
+            namespace = argv[argv.index("--namespace") + 1]
+            if namespace == "d8-kube-dns":
+                return ProcessResult(list(argv), 1, b"", b"not found", "start", "end", 1)
+            return ProcessResult(
+                list(argv),
+                0,
+                b'{"metadata":{"namespace":"kube-system","name":"coredns"},"data":{"Corefile":".:53 { errors }"}}',
+                b"",
+                "start",
+                "end",
+                1,
+            )
+
+        collector = KubectlCollector(kubeconfig="/tmp/readonly", timeout_seconds=1, max_wire_bytes=1024 * 1024)
+        with patch("kdiag.kubernetes.run_process", side_effect=fake_run):
+            result = collector._first_json_source(
+                "coredns_config",
+                (("d8-kube-dns", "coredns"), ("kube-system", "coredns")),
+                project_coredns_config,
+            )
+        self.assertEqual("collected", result["status"])
+        self.assertEqual("kube-system/coredns", result["discovered_at"])
+        self.assertEqual(["failed", "collected"], [item["status"] for item in result["attempts"]])
+        self.assertEqual(["d8-kube-dns", "kube-system"], [argv[argv.index("--namespace") + 1] for argv in calls])
 
 
 if __name__ == "__main__":

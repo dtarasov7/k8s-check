@@ -27,6 +27,8 @@
     "max_wire_bytes": 67108864,
     "max_bundle_bytes": 134217728,
     "system_namespaces": [
+      "d8-cni-cilium",
+      "d8-kube-dns",
       "kube-system"
     ],
     "application_namespaces": [],

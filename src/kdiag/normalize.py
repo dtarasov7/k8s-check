@@ -1,6 +1,7 @@
 import hashlib
 import json
 import re
+from collections import Counter, deque
 from datetime import datetime, timezone
 
 from kdiag.npd_rules import NPD_CATEGORY_PATTERNS
@@ -8,6 +9,7 @@ from kdiag.runtime import ACTIVE_SERVICE_STATES, RUNTIME_SERVICE_UNITS, loaded_r
 
 
 MAX_NORMALIZED_EVENTS = 50000
+MAX_NORMALIZATION_CANDIDATES = 200000
 MAX_UNKNOWN_FINGERPRINTS = 100
 CORRELATION_WINDOW_SECONDS = 15 * 60
 
@@ -117,6 +119,27 @@ CORRELATION_SPECS = (
 )
 
 
+NODE_CONTEXT_CATEGORIES = {
+    "cgroup_access_denied",
+    "conntrack_full",
+    "runtime_unavailable",
+    "api_unreachable",
+    "npd_task_hung",
+    "npd_unregister_netdevice",
+    "npd_kernel_oops",
+    "npd_ext4_error",
+    "npd_ext4_warning",
+    "npd_io_error",
+    "npd_xfs_shutdown",
+    "npd_memory_read_error",
+    "npd_hardware_corrected",
+    "npd_hardware_recoverable",
+    "npd_hardware_fatal",
+}
+NPD_CATEGORIES = {category for category, _pattern in NPD_CATEGORY_PATTERNS}
+DNS_COMPONENT_RE = re.compile(r"(?:^|[-_.])(coredns|kube-dns)(?:$|[-_.])", re.I)
+
+
 def _clean_text(value, limit=1024):
     if isinstance(value, list) and all(isinstance(item, int) and 0 <= item <= 255 for item in value):
         value = bytes(value).decode("utf-8", errors="replace")
@@ -135,11 +158,37 @@ def _template(message):
     return value[:300]
 
 
-def classify_message(message, reason=None):
+def classify_message(message, reason=None, source=None, component=None):
     categories = set(REASON_CATEGORIES.get(str(reason or "").lower(), ()))
-    for category, pattern in CATEGORY_PATTERNS + NPD_CATEGORY_PATTERNS:
+    for category, pattern in CATEGORY_PATTERNS:
         if pattern.search(message):
             categories.add(category)
+    source_name = str(source or "")
+    component_name = str(component or "")
+    # Calls without a source retain the original permissive public API. Every
+    # normalizer supplies a source and therefore gets the stricter context.
+    node_context = source is None or source_name in ("journal", "systemd_state", "kubernetes_condition")
+    kernel_context = source is None or source_name == "journal" and (
+        "kernel" in component_name.lower() or component_name in ("journal_kernel_current", "journal_kernel_previous")
+    )
+    if kernel_context:
+        for category, pattern in NPD_CATEGORY_PATTERNS:
+            if pattern.search(message):
+                categories.add(category)
+    if not node_context:
+        categories.difference_update(NODE_CONTEXT_CATEGORIES)
+    if not kernel_context:
+        categories.difference_update(NPD_CATEGORIES)
+    cni_context = node_context or source_name in ("kubernetes_event", "kubernetes_container_state") or "cilium" in component_name.lower()
+    if not cni_context:
+        categories.discard("cni_unavailable")
+    dns_context = source is None or bool(DNS_COMPONENT_RE.search(component_name))
+    if not dns_context:
+        categories.difference_update(("dns_servfail", "dns_forward_loop", "dns_upstream_failure"))
+    # A cgroup-specific EROFS is not evidence that the backing filesystem is
+    # generally read-only. Keeping both labels caused false storage failures.
+    if "cgroup_access_denied" in categories:
+        categories.discard("read_only_fs")
     return sorted(categories)
 
 
@@ -181,7 +230,23 @@ def _epoch(value):
         return None
 
 
-def _event(source, message, categories, evidence, timestamp=None, node=None, namespace=None, pod=None, container=None, component=None, reason=None, inferred_time=False):
+def _event(
+    source,
+    message,
+    categories,
+    evidence,
+    timestamp=None,
+    node=None,
+    namespace=None,
+    pod=None,
+    container=None,
+    component=None,
+    reason=None,
+    inferred_time=False,
+    first_timestamp=None,
+    last_timestamp=None,
+    occurrence_count=1,
+):
     clean_message = _clean_text(message)
     identity = "|".join(str(value or "") for value in (source, evidence, timestamp, clean_message))
     return {
@@ -189,6 +254,9 @@ def _event(source, message, categories, evidence, timestamp=None, node=None, nam
         "timestamp": timestamp,
         "timestamp_epoch": _epoch(timestamp),
         "timestamp_inferred": bool(inferred_time),
+        "first_timestamp": first_timestamp or timestamp,
+        "last_timestamp": last_timestamp or timestamp,
+        "occurrence_count": max(1, int(occurrence_count or 1)),
         "source": source,
         "node": node,
         "namespace": namespace,
@@ -213,6 +281,7 @@ def _command(snapshot, command_id):
 
 def _append(events, unknown, stats, event):
     stats["input_records"] += 1
+    stats["source_records"][event["source"]] += 1
     if not event["categories"]:
         stats["uncategorized_records"] += 1
         key = (event.get("component") or event["source"], event["fingerprint"])
@@ -237,9 +306,13 @@ def _append(events, unknown, stats, event):
             entry["count"] += 1
         return
     stats["categorized_records"] += 1
-    if len(events) >= MAX_NORMALIZED_EVENTS:
+    for category in event.get("categories", []):
+        stats["category_records"][category] += 1
+    if len(events) >= MAX_NORMALIZATION_CANDIDATES:
         stats["truncated"] = True
         stats["dropped_records"] += 1
+        stats["candidate_limit_drops"] += 1
+        stats["dropped_by_source"][event["source"]] += 1
         return
     events.append(event)
 
@@ -265,7 +338,8 @@ def _normalize_journals(node_name, snapshot, events, unknown, stats):
                 continue
             timestamp = _iso_from_microseconds(record.get("__REALTIME_TIMESTAMP")) or fallback
             reason = record.get("SYSLOG_IDENTIFIER")
-            categories = classify_message(message, reason)
+            component = record.get("_SYSTEMD_UNIT") or record.get("SYSLOG_IDENTIFIER") or command_id
+            categories = classify_message(message, reason, source="journal", component=component)
             evidence = "node-{0}.json.gz#commands.{1}:line-{2}".format(node_name, command_id, line_number)
             _append(
                 events,
@@ -278,7 +352,7 @@ def _normalize_journals(node_name, snapshot, events, unknown, stats):
                     evidence,
                     timestamp=timestamp,
                     node=node_name,
-                    component=record.get("_SYSTEMD_UNIT") or record.get("SYSLOG_IDENTIFIER") or command_id,
+                    component=component,
                     reason=reason,
                     inferred_time=timestamp == fallback,
                 ),
@@ -295,7 +369,7 @@ def _normalize_node_pod_logs(node_name, snapshot, events, unknown, stats):
                 inferred = False
             else:
                 timestamp, message, inferred = fallback, line, True
-            categories = classify_message(message)
+            categories = classify_message(message, source="cri_log", component=entry.get("container"))
             evidence = "node-{0}.json.gz#pod_logs.entries[{1}]:line-{2}".format(node_name, entry_index, line_number)
             _append(
                 events,
@@ -335,8 +409,11 @@ def _normalize_kubernetes_events(kubernetes, events, unknown, stats, pod_nodes):
         pod = regarding.get("name") if regarding.get("kind") == "Pod" else None
         message = item.get("note", "")
         reason = item.get("reason")
-        categories = classify_message(message, reason)
-        timestamp = item.get("eventTime") or item.get("lastTimestamp") or item.get("firstTimestamp") or fallback
+        component = item.get("reportingController") or item.get("reportingInstance")
+        categories = classify_message(message, reason, source="kubernetes_event", component=component)
+        first_timestamp = item.get("firstTimestamp") or item.get("eventTime")
+        last_timestamp = item.get("seriesLastObservedTime") or item.get("lastTimestamp") or item.get("eventTime")
+        timestamp = last_timestamp or first_timestamp or fallback
         _append(
             events,
             unknown,
@@ -350,9 +427,12 @@ def _normalize_kubernetes_events(kubernetes, events, unknown, stats, pod_nodes):
                 node=pod_nodes.get((namespace, pod)) or (regarding.get("name") if regarding.get("kind") == "Node" else None),
                 namespace=namespace,
                 pod=pod,
-                component=item.get("reportingController") or item.get("reportingInstance"),
+                component=component,
                 reason=reason,
                 inferred_time=timestamp == fallback,
+                first_timestamp=first_timestamp,
+                last_timestamp=last_timestamp,
+                occurrence_count=item.get("count") or 1,
             ),
         )
 
@@ -401,7 +481,7 @@ def _normalize_pod_states(kubernetes, events, stats, pod_nodes):
         metadata = item.get("metadata", {})
         namespace, pod = metadata.get("namespace"), metadata.get("name")
         label_values = set(str(value).lower() for value in metadata.get("labels", {}).values())
-        is_cilium = namespace == "kube-system" and ("cilium" in label_values or any("cilium" in value for value in label_values))
+        is_cilium = namespace in ("kube-system", "d8-cni-cilium") and ("cilium" in label_values or any("cilium" in value for value in label_values))
         node = pod_nodes.get((namespace, pod))
         status = item.get("status", {})
         phase = status.get("phase")
@@ -422,7 +502,9 @@ def _normalize_pod_states(kubernetes, events, stats, pod_nodes):
                     namespace=namespace,
                     pod=pod,
                     reason=status.get("reason"),
-                    inferred_time=not status.get("startTime"),
+                    # Pod startTime is not the phase-transition time. Preserve
+                    # it for ordering but exclude it from causal correlation.
+                    inferred_time=True,
                 ),
             )
         for status_field in ("initContainerStatuses", "containerStatuses"):
@@ -440,7 +522,12 @@ def _normalize_pod_states(kubernetes, events, stats, pod_nodes):
                         message = state["terminated"].get("message", "")
                         if state["terminated"].get("exitCode") not in (None, 0):
                             message = "exitCode={0} {1}".format(state["terminated"].get("exitCode"), message)
-                    categories = classify_message(message, reason)
+                    categories = classify_message(
+                        message,
+                        reason,
+                        source="kubernetes_container_state",
+                        component=container,
+                    )
                     if categories and is_cilium:
                         categories = sorted(set(categories) | {"cilium_unhealthy"})
                     if not categories:
@@ -448,6 +535,14 @@ def _normalize_pod_states(kubernetes, events, stats, pod_nodes):
                     evidence = "kubernetes.json.gz#sources.pods.items[{0}].status.{1}[{2}].{3}".format(
                         pod_index, status_field, status_index, state_name
                     )
+                    state_timestamp = fallback
+                    inferred = True
+                    if state.get("terminated"):
+                        state_timestamp = state["terminated"].get("finishedAt") or state["terminated"].get("startedAt") or fallback
+                        inferred = state_timestamp == fallback
+                    elif state.get("running"):
+                        state_timestamp = state["running"].get("startedAt") or fallback
+                        inferred = state_timestamp == fallback
                     _append(
                         events,
                         {},
@@ -457,14 +552,14 @@ def _normalize_pod_states(kubernetes, events, stats, pod_nodes):
                             "{0}: {1}".format(reason or state_name, message),
                             categories,
                             evidence,
-                            timestamp=fallback,
+                            timestamp=state_timestamp,
                             node=node,
                             namespace=namespace,
                             pod=pod,
                             container=container,
                             component=container,
                             reason=reason,
-                            inferred_time=True,
+                            inferred_time=inferred,
                         ),
                     )
 
@@ -479,7 +574,11 @@ def _normalize_kubernetes_logs(kubernetes, events, unknown, stats, pod_nodes):
                 timestamp, message, inferred = first, remainder, False
             else:
                 timestamp, message, inferred = fallback, line, True
-            categories = classify_message(message)
+            categories = classify_message(
+                message,
+                source="kubernetes_pod_log",
+                component=entry.get("container") or entry.get("pod"),
+            )
             evidence = "kubernetes.json.gz#logs.entries[{0}]:line-{1}".format(entry_index, line_number)
             _append(
                 events,
@@ -544,64 +643,138 @@ def _normalize_service_states(node_name, snapshot, events, stats):
         )
 
 
+def _correlation_scope(event, correlation_id):
+    if correlation_id == "probe_network_failure":
+        if event.get("namespace") and event.get("pod"):
+            return "pod:{0}/{1}".format(event["namespace"], event["pod"])
+        return None
+    if event.get("node"):
+        return "node:{0}".format(event["node"])
+    return None
+
+
+def _episode(correlation_id, scope, match, groups, window_seconds):
+    selected = []
+    for group in groups:
+        selected.extend(event for event in match if set(event.get("categories", ())) & group)
+    unique = {event["event_id"]: event for event in selected}
+    if len(unique) < 2:
+        return None
+    ordered = sorted(unique.values(), key=lambda event: (event["timestamp_epoch"], event["event_id"]))[:20]
+    started_at = ordered[0].get("timestamp")
+    ended_at = ordered[-1].get("timestamp")
+    duration = max(0.0, ordered[-1]["timestamp_epoch"] - ordered[0]["timestamp_epoch"])
+    identity = "|".join((correlation_id, scope, str(ordered[0]["timestamp_epoch"]), str(ordered[-1]["timestamp_epoch"])))
+    return {
+        "correlation_id": correlation_id,
+        "episode_id": hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24],
+        "scope": scope,
+        "window_seconds": window_seconds,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "duration_seconds": duration,
+        "categories": sorted(set().union(*(set(event["categories"]) for event in ordered))),
+        "sources": sorted(set(event["source"] for event in ordered)),
+        "event_ids": [event["event_id"] for event in ordered],
+        "evidence": sorted(set(event["evidence"] for event in ordered)),
+    }
+
+
 def correlate_events(events, window_seconds=CORRELATION_WINDOW_SECONDS):
-    scopes = {}
-    for event in events:
-        if event.get("node"):
-            scope = event["node"]
-        elif event.get("namespace") and event.get("pod"):
-            scope = "pod:{0}/{1}".format(event["namespace"], event["pod"])
-        else:
-            continue
-        scopes.setdefault(scope, []).append(event)
     correlations = []
-    for scope, scoped_events in sorted(scopes.items()):
-        for correlation_id, groups in CORRELATION_SPECS:
-            relevant_categories = set().union(*groups)
-            candidates = sorted(
-                (
-                    event
-                    for event in scoped_events
-                    if event.get("timestamp_epoch") is not None
-                    and not (event.get("source") == "systemd_state" and event.get("timestamp_inferred"))
-                    and set(event.get("categories", ())) & relevant_categories
-                ),
-                key=lambda event: (event["timestamp_epoch"], event["event_id"]),
-            )
-            match = None
-            category_counts = {}
-            left = 0
-            for right, event in enumerate(candidates):
-                for category in set(event.get("categories", ())) & relevant_categories:
-                    category_counts[category] = category_counts.get(category, 0) + 1
-                while candidates[right]["timestamp_epoch"] - candidates[left]["timestamp_epoch"] > window_seconds:
-                    for category in set(candidates[left].get("categories", ())) & relevant_categories:
-                        category_counts[category] -= 1
-                    left += 1
-                if right > left and all(any(category_counts.get(category, 0) for category in group) for group in groups):
-                    match = candidates[left : right + 1]
+    for correlation_id, groups in CORRELATION_SPECS:
+        relevant_categories = set().union(*groups)
+        scopes = {}
+        for event in events:
+            if event.get("timestamp_epoch") is None or event.get("timestamp_inferred"):
+                continue
+            if not set(event.get("categories", ())) & relevant_categories:
+                continue
+            scope = _correlation_scope(event, correlation_id)
+            if scope:
+                scopes.setdefault(scope, []).append(event)
+        for scope, scoped_events in sorted(scopes.items()):
+            candidates = sorted(scoped_events, key=lambda event: (event["timestamp_epoch"], event["event_id"]))
+            start = 0
+            while start < len(candidates):
+                category_counts = Counter()
+                match = None
+                left = start
+                for right in range(start, len(candidates)):
+                    event = candidates[right]
+                    category_counts.update(set(event.get("categories", ())) & relevant_categories)
+                    while event["timestamp_epoch"] - candidates[left]["timestamp_epoch"] > window_seconds:
+                        category_counts.subtract(set(candidates[left].get("categories", ())) & relevant_categories)
+                        left += 1
+                    if right > left and all(any(category_counts[category] > 0 for category in group) for group in groups):
+                        match = candidates[left : right + 1]
+                        start = right + 1
+                        break
+                if match is None:
                     break
-            if not match:
-                continue
-            selected = []
-            for group in groups:
-                selected.extend(event for event in match if set(event.get("categories", ())) & group)
-            unique = {event["event_id"]: event for event in selected}
-            if len(unique) < 2:
-                continue
-            ordered = sorted(unique.values(), key=lambda event: (event.get("timestamp_epoch") or 0, event["event_id"]))[:20]
-            correlations.append(
-                {
-                    "correlation_id": correlation_id,
-                    "scope": scope,
-                    "window_seconds": window_seconds,
-                    "categories": sorted(set().union(*(set(event["categories"]) for event in ordered))),
-                    "sources": sorted(set(event["source"] for event in ordered)),
-                    "event_ids": [event["event_id"] for event in ordered],
-                    "evidence": sorted(set(event["evidence"] for event in ordered)),
-                }
-            )
-    return correlations
+                episode = _episode(correlation_id, scope, match, groups, window_seconds)
+                if episode:
+                    correlations.append(episode)
+    return sorted(correlations, key=lambda item: (item["started_at"] or "", item["correlation_id"], item["scope"]))
+
+
+def _deduplicate_events(events, stats):
+    deduplicated = {}
+    for event in events:
+        key = (
+            event.get("source"),
+            event.get("node"),
+            event.get("namespace"),
+            event.get("pod"),
+            event.get("container"),
+            event.get("timestamp"),
+            tuple(event.get("categories", ())),
+            event.get("fingerprint"),
+        )
+        existing = deduplicated.get(key)
+        if existing is None:
+            deduplicated[key] = event
+            continue
+        existing["occurrence_count"] += event.get("occurrence_count", 1)
+        evidence = existing.setdefault("duplicate_evidence", [])
+        if event.get("evidence") != existing.get("evidence") and event.get("evidence") not in evidence:
+            evidence.append(event.get("evidence"))
+        stats["deduplicated_records"] += 1
+        stats["dropped_by_source"][event["source"]] += 1
+    return list(deduplicated.values())
+
+
+def _event_bucket(event):
+    if event.get("namespace") and event.get("pod"):
+        scope = "pod:{0}/{1}".format(event["namespace"], event["pod"])
+    elif event.get("node"):
+        scope = "node:{0}".format(event["node"])
+    else:
+        scope = "cluster"
+    return event.get("source"), scope, tuple(event.get("categories", ()))
+
+
+def _fair_limit_events(events, limit, stats):
+    if len(events) <= limit:
+        return events
+    buckets = {}
+    for event in events:
+        buckets.setdefault(_event_bucket(event), deque()).append(event)
+    retained = []
+    active = deque(sorted(buckets))
+    while active and len(retained) < limit:
+        key = active.popleft()
+        retained.append(buckets[key].popleft())
+        if buckets[key]:
+            active.append(key)
+    retained_ids = {event["event_id"] for event in retained}
+    for event in events:
+        if event["event_id"] not in retained_ids:
+            stats["dropped_records"] += 1
+            stats["output_limit_drops"] += 1
+            stats["dropped_by_source"][event["source"]] += 1
+    stats["truncated"] = True
+    return retained
 
 
 def normalize_evidence(collection, node_snapshots, kubernetes):
@@ -615,6 +788,12 @@ def normalize_evidence(collection, node_snapshots, kubernetes):
         "dropped_records": 0,
         "unknown_fingerprint_replacements": 0,
         "cgroup_events_suppressed": 0,
+        "candidate_limit_drops": 0,
+        "output_limit_drops": 0,
+        "deduplicated_records": 0,
+        "source_records": Counter(),
+        "category_records": Counter(),
+        "dropped_by_source": Counter(),
         "truncated": False,
     }
     for node_name, snapshot in sorted(node_snapshots.items()):
@@ -629,20 +808,21 @@ def normalize_evidence(collection, node_snapshots, kubernetes):
     if collection.get("options", {}).get("collect_cgroup", True) is False:
         filtered_events = []
         for event in events:
-            categories = [category for category in event.get("categories", []) if category != "cgroup_access_denied"]
-            if len(categories) == len(event.get("categories", [])):
-                filtered_events.append(event)
+            if "cgroup_access_denied" in event.get("categories", []):
+                stats["cgroup_events_suppressed"] += 1
+                stats["dropped_by_source"][event["source"]] += 1
                 continue
-            stats["cgroup_events_suppressed"] += 1
-            if categories:
-                filtered_event = dict(event)
-                filtered_event["categories"] = categories
-                filtered_event["severity"] = _severity(categories)
-                filtered_events.append(filtered_event)
+            filtered_events.append(event)
         events = filtered_events
+    events = _deduplicate_events(events, stats)
+    events = _fair_limit_events(events, MAX_NORMALIZED_EVENTS, stats)
     events.sort(key=lambda event: (event.get("timestamp_epoch") or 0, event["event_id"]))
     unknown_values = sorted(unknown.values(), key=lambda item: (-item["count"], item["component"], item["fingerprint"]))
     stats["unknown_retained_fingerprints"] = len(unknown_values)
+    stats["retained_source_records"] = dict(Counter(event["source"] for event in events))
+    stats["source_records"] = dict(stats["source_records"])
+    stats["category_records"] = dict(stats["category_records"])
+    stats["dropped_by_source"] = dict(stats["dropped_by_source"])
     return {
         "schema_version": 1,
         "kind": "normalized_events",

@@ -1,4 +1,4 @@
-RULE_PACK_VERSION = "2026.08.4"
+RULE_PACK_VERSION = "2026.08.7"
 
 
 SOURCES = {
@@ -50,8 +50,11 @@ def _entry(title, classification, sources, description):
 RULE_CATALOG = {
     "collector.node_gap": _entry("Неполный node snapshot", "fact", ("systemd_journal",), "Один или несколько узлов не были собраны."),
     "collector.evidence_gap": _entry("Неполные обязательные журналы", "fact", ("systemd_journal", "k8s_logging"), "Обязательный журнал завершился ошибкой, timeout или permission failure."),
+    "collector.normalization_truncated": _entry("Нормализация усечена", "fact", ("k8s_logging",), "Лимит нормализации отбросил часть категоризированных событий; зависимые правила имеют evidence gap."),
     "collector.boot_changed": _entry("Перезагрузка во время сбора", "fact", ("systemd_journal",), "Boot ID изменился между началом и концом node snapshot."),
     "inventory.mixed_kernel": _entry("Разные ядра", "fact", ("k8s_124", "k8s_131"), "Инвентаризационный drift, сам по себе не являющийся неисправностью."),
+    "inventory.node_set_mismatch": _entry("Inventory и Node objects расходятся", "fact", ("k8s_nodes",), "Набор собранных node snapshots не совпадает с Kubernetes Node objects."),
+    "inventory.mixed_apiserver_versions": _entry("Разные версии API server", "fact", ("k8s_version_skew",), "API server instances имеют разные minor versions; допустимость зависит от этапа upgrade и version-skew policy."),
     "node.low_root_disk": _entry("Мало места на корневой ФС", "fact", ("k8s_pressure",), "Свободно менее десяти процентов блоков корневой файловой системы."),
     "node.low_inodes": _entry("Мало inode", "fact", ("k8s_pressure",), "По df -Pi свободно менее пяти процентов inode."),
     "node.kubelet_inactive": _entry("kubelet не активен", "fact", ("k8s_nodes", "systemd_journal"), "systemd сообщает неактивное состояние kubelet."),
@@ -116,19 +119,19 @@ RULE_CATALOG = {
     "kubernetes.init_container_failed": _entry("Init container failed", "fact", ("k8s_debug_pods",), "Init container ожидает с ошибкой либо завершился ненулевым кодом."),
     "kubernetes.container_exit_nonzero": _entry("Container завершён с ошибкой", "fact", ("k8s_debug_pods",), "Container в Failed Pod завершён ненулевым кодом без OOMKilled/Completed."),
     "kubernetes.pod_evicted": _entry("Pod evicted", "fact", ("k8s_pressure",), "Pod phase/reason сообщает eviction."),
-    "kubernetes.pod_restart_storm": _entry("Недавние частые рестарты", "fact", ("k8s_debug_pods",), "restartCount не менее пяти и последнее завершение произошло не более часа назад."),
+    "kubernetes.pod_restart_storm": _entry("Высокий cumulative restartCount", "fact", ("k8s_debug_pods",), "restartCount не менее пяти и последнее завершение произошло не более часа назад; частота из одного snapshot не выводится."),
     "kubernetes.deployment_rollout_failed": _entry("Deployment rollout failed", "fact", ("k8s_debug_pods",), "Deployment condition сообщает ProgressDeadlineExceeded или ReplicaFailure."),
     "kubernetes.daemonset_misscheduled": _entry("DaemonSet misscheduled", "fact", ("k8s_debug_pods",), "DaemonSet status.numberMisscheduled больше нуля."),
-    "kubernetes.statefulset_rollout_stalled": _entry("StatefulSet rollout stalled", "fact", ("k8s_debug_pods",), "currentRevision и updateRevision различаются при неполном updatedReplicas."),
+    "kubernetes.statefulset_rollout_stalled": _entry("StatefulSet rollout failed", "fact", ("k8s_debug_pods",), "StatefulSet имеет явную failed condition; одно различие currentRevision/updateRevision считается нормальным rollout evidence."),
     "kubernetes.job_failed": _entry("Job failed", "fact", ("k8s_debug_pods",), "Job condition Failed=True."),
     "pdb.insufficient_healthy": _entry("PDB insufficient healthy", "fact", ("k8s_pdb",), "currentHealthy меньше desiredHealthy при ненулевом expectedPods."),
     "pdb.disruption_blocked": _entry("PDB blocks disruptions", "fact", ("k8s_pdb",), "disruptionsAllowed равно нулю; это эксплуатационный факт, не самостоятельный отказ."),
     "runtime.cri_not_ready": _entry("CRI RuntimeReady=False", "fact", ("k8s_crictl",), "crictl info сообщает отрицательное RuntimeReady condition."),
     "runtime.cri_network_not_ready": _entry("CRI NetworkReady=False", "fact", ("k8s_crictl", "cilium_troubleshooting"), "crictl info сообщает отрицательное NetworkReady condition."),
     "node.swap_active": _entry("Swap active при failSwapOn", "fact", ("kubeadm_troubleshooting",), "В /proc/swaps есть активные устройства, а kubelet failSwapOn не отключён."),
-    "node.low_runtime_disk": _entry("Runtime filesystem заполнена", "fact", ("k8s_pressure",), "Отдельный mount kubelet/runtime/logs заполнен не менее чем на 90 процентов."),
+    "node.low_runtime_disk": _entry("Runtime filesystem заполнена", "fact", ("k8s_pressure",), "Отдельная backing filesystem kubelet/runtime/logs заполнена не менее чем на 90 процентов; дочерние read-only snapshot mounts игнорируются."),
     "dns.nameserver_limit_exceeded": _entry("Слишком много nameserver", "fact", ("coredns_troubleshooting",), "Resolver, используемый kubelet, содержит более трёх nameserver."),
-    "dns.coredns_errors": _entry("CoreDNS resolution errors", "fact", ("coredns_troubleshooting",), "CoreDNS logs содержат SERVFAIL, forwarding loop или upstream failure."),
+    "dns.coredns_errors": _entry("CoreDNS resolution errors", "fact", ("coredns_troubleshooting",), "CoreDNS logs содержат SERVFAIL, forwarding loop или upstream failure; summary включает извлечённые query name, type и частоту."),
     "dns.coredns_config_empty": _entry("CoreDNS Corefile missing", "fact", ("coredns_troubleshooting",), "ConfigMap coredns не содержит непустой Corefile."),
     "certificate.kubelet_rotation_broken": _entry("Kubelet certificate rotation path broken", "fact", ("kubeadm_troubleshooting",), "rotateCertificates=true, но kubelet-client-current.pem отсутствует, не является symlink либо имеет недоступный target."),
     "inventory.unsupported_version_skew": _entry("Unsupported Kubernetes version skew", "fact", ("k8s_version_skew",), "Версии kubelet/kube-apiserver выходят за поддерживаемые границы, включая двух-minor предел для kubelet младше 1.25."),

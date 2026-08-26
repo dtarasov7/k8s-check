@@ -2,7 +2,7 @@
 
 ## 1. Purpose and scope
 
-<code>kdiag 0.6.0</code> creates a one-time emergency snapshot of a Kubernetes cluster and performs deterministic, fully offline analysis. Its current diagnostic compatibility scope is vanilla Kubernetes and Deckhouse with Kubernetes 1.24–1.31, up to 20 nodes and about 1,000 Pods. This describes evidence/rule compatibility, not lifecycle support: Kubernetes 1.24 and 1.31 have both reached upstream end of life.
+<code>kdiag 0.7.0</code> creates a one-time emergency snapshot of a Kubernetes cluster and performs deterministic, fully offline analysis. Its current diagnostic compatibility scope is vanilla Kubernetes and Deckhouse CSE Pro 1.74 with Kubernetes 1.24–1.31, up to 20 nodes and about 1,000 Pods. This describes evidence/rule compatibility, not lifecycle support.
 
 The program runs on a separate management server. It connects to every node over SSH, runs read-only inspection through non-interactive sudo, and queries the Kubernetes API using a dedicated kubeconfig. Prometheus is optional: the snapshot still works when Prometheus or the entire Kubernetes API is unavailable.
 
@@ -117,7 +117,7 @@ Use a separate identity even if a super-admin is available for an initial contro
 
 Review every binding subject before applying the manifest. Do not add Secret access, pods/exec, or write verbs. Application namespace Roles are not generated automatically: create an equivalent namespaced Role and RoleBinding, bind it to <code>kdiag-system/kdiag-reader</code>, and add only the approved namespace to the configuration.
 
-The enabled collector reads Nodes, Pods, Events, workloads, Services, EndpointSlices, PDBs, PVCs, PVs, APIService, Leases, VolumeAttachments, CSI objects, StorageClasses, NetworkPolicies, selected Cilium CRDs, allowlisted fields from the <code>cilium-config</code> and <code>coredns</code> ConfigMaps, the non-resource URL <code>/readyz</code>, and Pod logs only in approved namespaces.
+The enabled collector reads Nodes, Pods, Events, workloads, Services, EndpointSlices, PDBs, PVCs, PVs, APIService, Leases, VolumeAttachments, CSI objects, StorageClasses, NetworkPolicies, selected Cilium CRDs, allowlisted fields from the <code>cilium-config</code> and <code>coredns</code> ConfigMaps, the non-resource URL <code>/readyz</code>, and Pod logs only in approved namespaces. ConfigMap discovery tries Deckhouse locations (`d8-cni-cilium`, `d8-kube-dns`) first and then vanilla `kube-system`, recording every attempt and the selected object.
 
 ### Creating a kubeconfig for kdiag-reader
 
@@ -242,7 +242,7 @@ Copy <code>config/snapshot.example.json</code> to an environment-specific file. 
 | <code>kubernetes.command_timeout_seconds</code> | 30 | Per-request timeout. |
 | <code>kubernetes.max_wire_bytes</code> | 67108864 | Maximum raw API response. |
 | <code>kubernetes.max_bundle_bytes</code> | 134217728 | Maximum compressed API bundle. |
-| <code>kubernetes.system_namespaces</code> | [kube-system] | Allowlist for system Pod logs. |
+| <code>kubernetes.system_namespaces</code> | [d8-cni-cilium, d8-kube-dns, kube-system] | Allowlist for vanilla and Deckhouse system Pod logs. |
 | <code>kubernetes.application_namespaces</code> | [] | Explicit application-log allowlist; empty means none. |
 | <code>kubernetes.collect_system_logs</code> | true | Collect bounded selected system logs. |
 | <code>kubernetes.log_tail_lines</code> | 200 | Requested tail per container. |
@@ -354,6 +354,8 @@ Each run creates <code>&lt;output&gt;/&lt;collection-id&gt;/</code>:
 
 Inventory names and Kubernetes Node names may differ; inconsistent hostname configuration reduces correlation quality.
 
+Coverage is recorded for every node command, node Pod-log group, Kubernetes source, and Kubernetes log entry. A collected parent bundle does not hide an inner `failed`, `timeout`, or `truncated` check. `facts.json`, `findings.json`, and `report.json` include a rule evaluation ledger: `matched`, `not_matched`, `unknown` with missing evidence, or `not_applicable`. Treat `unknown` as an explicit evidence gap, not as a healthy result.
+
 ~~~bash
 python3.8 dist/kdiag.pyz report /var/lib/kdiag/COLLECTION_ID
 python3.8 dist/kdiag.pyz verify /var/lib/kdiag/COLLECTION_ID
@@ -369,11 +371,11 @@ Read collection status/evidence gaps first, then facts, correlations, and hypoth
 
 No finding does not mean no problem. Evidence may be outside the time window, truncated, denied, unreachable, unknown to the rule pack, or stored in a non-standard layout.
 
-The normalizer handles journald JSON, direct CRI logs, Kubernetes Events, Node conditions, Pod/container states, selected Pod logs, and systemd states. It retains at most 50,000 categorized records and 100 approximate heavy-hitter fingerprints for unknown messages. Correlation families cover runtime/Node, CNI/Node, probe/network, memory/OOM, storage, cgroup/service, certificate/API, and conntrack/network failures.
+The normalizer handles journald JSON, direct CRI logs, Kubernetes Events, Node conditions, Pod/container states, selected Pod logs, and systemd states. It deduplicates records, fairly limits output across source/scope/category buckets, and excludes inferred timestamps from causal correlations. Correlation output consists of independent Pod- or Node-scoped episodes with start, end, duration, and episode ID. Truncation produces explicit per-source counters and a finding.
 
 ## 12. Detailed check catalogue
 
-The artifact contains 93 report rules. Query the exact embedded version with:
+The artifact contains 96 report rules. Query the exact embedded version with:
 
 ~~~bash
 python3.8 dist/kdiag.pyz rules list
@@ -387,7 +389,9 @@ python3.8 dist/kdiag.pyz rules list --json
 |---|---|---|---|
 | <code>collector.node_gap</code> | fact | Requested node bundle missing, failed, timed out, or unacceptable. | Restore SSH/sudo/Python/disk access; preserve the partial capture first. |
 | <code>collector.evidence_gap</code> | fact | Required journals, Pod logs, or Kubernetes sources denied, failed, unsupported, or truncated. Optional Cilium CRD, CSIStorageCapacity, or Prometheus absence alone is excluded. | Inspect source statuses and correct only the missing permission, timeout, or cap. |
+| <code>collector.normalization_truncated</code> | fact | Normalization limits omitted categorized records. | Treat dependent negative results as incomplete and adjust only the relevant limit/window. |
 | <code>collector.boot_changed</code> | fact | Node boot ID changed during collection. | Split the timeline at reboot; pre/post state was not simultaneous. |
+| <code>inventory.node_set_mismatch</code> | fact | Inventory snapshots and Kubernetes Node objects differ. | Check inventory aliases, cluster membership, and SSH reachability. |
 | <code>collector.etcd_evidence_gap</code> | fact | Enabled etcd evidence is unavailable, partial, unsupported, or failed. | Check topology, standard paths, tools, and access; do not infer health from absence. |
 | <code>inventory.mixed_kernel</code> | fact | More than one kernel release across nodes. | Compare modules, Cilium/runtime/KESL compatibility and rollout history; mixture is risk, not automatically failure. |
 | <code>inventory.unsupported_version_skew</code> | fact | kube-apiserver or kubelet minor versions exceed the supported skew. | Plan version alignment using the version-skew policy; do not improvise the upgrade order. |
@@ -407,7 +411,7 @@ python3.8 dist/kdiag.pyz rules list --json
 | <code>runtime.cri_not_ready</code> | fact | CRI reports RuntimeReady=False. | Inspect runtime service/socket, cgroups, and runtime storage. |
 | <code>runtime.cri_network_not_ready</code> | fact | CRI reports NetworkReady=False. | Inspect Cilium, CNI configuration, and sandbox Events on the node. |
 | <code>node.swap_active</code> | fact | Swap is active while kubelet failSwapOn is not disabled. | Compare intended kubelet policy and actual swap usage before changing the node. |
-| <code>node.low_runtime_disk</code> | fact | A separate kubelet/runtime/log filesystem is at least 90% used. | Identify the consumer on that mount; do not blindly remove runtime data. |
+| <code>node.low_runtime_disk</code> | fact | A separate backing filesystem for kubelet/runtime/log data is at least 90% used. Read-only container snapshot submounts, including EROFS layers, are ignored. | Identify the consumer on that mount; do not blindly remove runtime data. |
 | <code>certificate.kubelet_rotation_broken</code> | fact | Certificate rotation is enabled but kubelet-client-current.pem or its target is invalid. | Inspect the symlink, target certificate, and kubelet journal; do not replace certificates automatically. |
 
 ### 12.3 Node Problem Detector-derived kernel signatures
@@ -487,7 +491,7 @@ Exact read-only commands for checking one node manually, together with a sanitiz
 | <code>dns.kube_dns_unavailable</code> | fact | kube-dns absent/no ready endpoints, or CoreDNS Pods absent/not Running/not fully ready. | Inspect CoreDNS, Service/Slices, Cilium, and upstream resolvers. |
 | <code>dns.cluster_dns_mismatch</code> | fact | Explicit kubelet clusterDNS has no overlap with kube-dns ClusterIP values. | Check all address families/config sources, then use controlled rollout. |
 | <code>dns.nameserver_limit_exceeded</code> | fact | The kubelet resolver contains more than three nameservers. | Check kubelet resolvConf and use a reviewed local caching resolver if required. |
-| <code>dns.coredns_errors</code> | fact | CoreDNS logs contain SERVFAIL, forwarding-loop, or upstream-failure evidence. | Inspect forward targets, loop plugin, upstream reachability, and node resolver state. |
+| <code>dns.coredns_errors</code> | fact | CoreDNS logs contain SERVFAIL, forwarding-loop, or upstream-failure evidence. The report groups up to 20 extracted query names by type and occurrence count while retaining source line references. | Check the listed names for typos or nonexistent zones, then inspect forward targets, loop plugin, upstream reachability, and node resolver state. |
 | <code>dns.coredns_config_empty</code> | fact | The coredns ConfigMap has no non-empty Corefile. | Restore the approved Corefile through change control. |
 
 ### 12.8 Control plane and API
@@ -578,7 +582,7 @@ LLM processing is split into explicit stages. “Minimization” means selecting
 | `llm analyze-local` | no | no | local service only |
 | `llm import-response` | no | restores known external tokens | no |
 
-The source collection remains confidential and is never given to an inference service. Both prepare profiles omit raw node/Kubernetes bundles, full journals, and full Pod logs and enforce a package-size budget.
+The source collection remains confidential and is never given to an inference service. Both prepare profiles omit raw bundles and full logs, but include selected bounded evidence fragments with `status`, `value`, `excerpt`, and `timestamp` for their `EVIDENCE_NNN` identifiers. Fragment/event/fingerprint truncation is explicit in the package.
 
 ### 15.1 Prepare a local package
 
@@ -651,7 +655,7 @@ python3.8 dist/kdiag.pyz llm prepare /var/lib/kdiag/<collection-id> \
 python3.8 dist/kdiag.pyz llm validate-export /secure/llm-external/export
 ~~~
 
-The external profile replaces known topology and identity values with incident-local tokens and blocks the export when outbound DLP finds a residual IP/CIDR, MAC, DNS name, URL, e-mail, UID, absolute host path, credential pattern, private key, JWT, or canary. Component names and versions such as Kubernetes, Cilium, container runtime, etcd, CoreDNS, kernel, and RED OS are retained. Inspect `preview.md`, `incident.external.json`, `prompt.external.txt`, and `redaction-report.json`; then manually submit only the `export/` contents. Never transfer sibling `private/token-map.json`.
+The external profile replaces node/host, namespace, Pod, Service, user/account/ServiceAccount, network-topology, path, UID, and endpoint values in findings and evidence fragments. It blocks the export when outbound DLP finds a residual IP/CIDR, MAC, DNS name, URL, e-mail, UID, absolute host path, credential pattern, private key, JWT, or canary. Component names and versions such as Kubernetes, Cilium, container runtime, etcd, CoreDNS, kernel, and RED OS are retained. Inspect `preview.md`, `incident.external.json`, `prompt.external.txt`, and `redaction-report.json`; then manually submit only the `export/` contents. Never transfer sibling `private/token-map.json`.
 
 ### 15.4 Import a manually saved external response
 

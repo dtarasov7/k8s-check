@@ -12,9 +12,9 @@ rectangle "Bounded source collection" as Collection {
 
 database "Raw gzip/JSON evidence" as Raw
 component "Event normalization\nclassification and fingerprinting" as Normalize
-component "Scoped 15-minute\ncorrelation" as Correlate
+component "Independent scoped 15-minute\ncorrelation episodes" as Correlate
 component "Versioned deterministic\nrule evaluation" as Rules
-component "Coverage and node\ninventory extraction" as Facts
+component "Per-check coverage, rule ledger\nand node inventory" as Facts
 component "Report assembly" as Report
 database "Derived artifacts" as Derived
 component "SHA-256 manifest" as Manifest
@@ -29,6 +29,7 @@ Raw --> Rules : Structured state
 Raw --> Facts
 Rules --> Report : Facts, correlations, hypotheses
 Facts --> Report
+Facts --> Rules : Unknown / not applicable context
 Normalize --> Derived : normalized-events.json.gz
 Facts --> Derived : facts.json
 Rules --> Derived : findings.json
@@ -38,7 +39,7 @@ Derived --> Manifest
 Manifest --> Derived : manifest.json
 
 note right of Rules
-Missing evidence remains a coverage gap;
-it is not converted into a match.
+Every rule is matched, not matched, unknown,
+or not applicable. Inferred time is never causal.
 end note
 @enduml

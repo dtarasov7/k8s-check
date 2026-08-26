@@ -25,6 +25,7 @@ class ReportTest(unittest.TestCase):
                         "service_states": {"kubelet.service": {"status": "collected", "properties": {"ActiveState": "active"}}},
                     },
                     "commands": [],
+                    "pod_logs": {"status": "truncated", "entries": []},
                 },
             )
             atomic_write_gzip_json(root / "prometheus.json.gz", {"status": "not_configured"})
@@ -64,10 +65,16 @@ class ReportTest(unittest.TestCase):
             coverage = {item["source"]: item["status"] for item in report["coverage"]}
             self.assertEqual("collected", coverage["kubernetes/nodes"])
             self.assertEqual("failed", coverage["kubernetes/events"])
+            self.assertEqual("truncated", coverage["node/n1/pod_logs"])
             self.assertIn("collector.node_gap", {item["rule_id"] for item in report["findings"]})
+            ledger = {item["rule_id"]: item for item in report["rule_evaluation_ledger"]}
+            self.assertEqual("matched", ledger["collector.node_gap"]["status"])
+            self.assertEqual("unknown", ledger["kubernetes.node_not_ready"]["status"])
+            self.assertTrue(ledger["kubernetes.node_not_ready"]["missing_evidence"])
             self.assertFalse(report["options"]["collect_cgroup"])
             self.assertEqual("disabled", report["node_inventory"][0]["cgroup_mode"])
             self.assertIn("Cgroup checks: **disabled**", (root / "report.md").read_text(encoding="utf-8"))
+            self.assertIn("Rule ID:", (root / "report.md").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -32,6 +32,17 @@ CGROUP_RULE_IDS = frozenset(
     )
 )
 
+COREDNS_ERROR_QUERY_RE = re.compile(
+    r"\bplugin/errors:\s+\d+\s+([^\s:]{1,254})\s+([A-Z][A-Z0-9-]{0,15}):",
+    re.I,
+)
+COREDNS_LOG_QUERY_RE = re.compile(
+    r'"\s*([A-Z][A-Z0-9-]{0,15})\s+IN\s+([^\s"]{1,254})(?:\s|\")',
+    re.I,
+)
+COREDNS_QUERY_NAME_RE = re.compile(r"(?:\\[0-9]{3}|[A-Z0-9_*?-])(?:\\[0-9]{3}|[A-Z0-9_.*?-]){0,252}\.?", re.I)
+MAX_COREDNS_QUERY_DETAILS = 20
+
 
 def _finding(
     rule_id,
@@ -46,29 +57,34 @@ def _finding(
     classification=None,
     counter_evidence=None,
     missing_checks=None,
+    detection_confidence=None,
 ):
     metadata = rule_metadata(rule_id)
     affected_values = sorted(set(value for value in affected if value is not None))
     scope = ",".join(affected_values) if affected_values else "cluster"
     if len(scope) > 200:
         scope = "sha256-" + hashlib.sha256(scope.encode("utf-8")).hexdigest()[:24]
+    resolved_classification = classification or metadata["classification"]
     return {
         "id": "{0}:{1}".format(rule_id, scope),
         "rule_id": rule_id,
         "finding_status": "matched",
-        "classification": classification or metadata["classification"],
+        "classification": resolved_classification,
         "rule_pack_version": RULE_PACK_VERSION,
         "version_scope": metadata["version_scope"],
         "source_refs": metadata["sources"],
         "severity": severity,
         "causal_confidence": causal_confidence,
+        "detection_confidence": detection_confidence or ("high" if resolved_classification == "fact" else "medium"),
         "title": title,
         "summary": summary,
         "affected": affected_values,
-        "evidence": sorted(evidence),
-        "alternatives": alternatives or [],
-        "counter_evidence": counter_evidence or [],
-        "missing_checks": missing_checks or [],
+        "affected_total": len(affected_values),
+        "evidence": sorted(evidence)[:100],
+        "evidence_total": len(set(evidence)),
+        "alternatives": (alternatives or [])[:20],
+        "counter_evidence": (counter_evidence or [])[:20],
+        "missing_checks": (missing_checks or [])[:20],
         "recommendation": recommendation,
     }
 
@@ -109,7 +125,7 @@ def _event_target(event):
 
 
 def _event_finding(rule_id, severity, title, summary, events, recommendation, confidence="high", alternatives=None, classification=None):
-    return _finding(
+    finding = _finding(
         rule_id,
         severity,
         title,
@@ -120,6 +136,62 @@ def _event_finding(rule_id, severity, title, summary, events, recommendation, co
         causal_confidence=confidence,
         alternatives=alternatives,
         classification=classification,
+    )
+    timestamps = sorted(event.get("timestamp") for event in events if event.get("timestamp") and not event.get("timestamp_inferred"))
+    if timestamps:
+        finding["started_at"] = timestamps[0]
+        finding["ended_at"] = timestamps[-1]
+    finding["event_count"] = sum(int(event.get("occurrence_count") or 1) for event in events)
+    finding["evidence_fragments"] = [
+        {
+            "reference": event.get("evidence"),
+            "status": "collected",
+            "timestamp": event.get("timestamp"),
+            "excerpt": event.get("message_excerpt"),
+        }
+        for event in events[:20]
+        if event.get("evidence")
+    ]
+    return finding
+
+
+def _coredns_error_query(message):
+    text = str(message or "")
+    match = COREDNS_ERROR_QUERY_RE.search(text)
+    if match:
+        name, query_type = match.group(1), match.group(2)
+    else:
+        match = COREDNS_LOG_QUERY_RE.search(text)
+        if not match:
+            return None
+        query_type, name = match.group(1), match.group(2)
+    if not COREDNS_QUERY_NAME_RE.fullmatch(name):
+        return None
+    return (name.rstrip(".").lower() or ".", query_type.upper())
+
+
+def _coredns_error_summary(events):
+    counts = {}
+    identified = 0
+    for event in events:
+        query = _coredns_error_query(event.get("message_excerpt"))
+        if not query:
+            continue
+        identified += 1
+        counts[query] = counts.get(query, 0) + 1
+    summary = "Найдено событий: {0}.".format(len(events))
+    if not counts:
+        return summary + " Имена DNS-запросов не удалось извлечь из этого формата CoreDNS log."
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0][0], item[0][1]))
+    details = ["{0} [{1}] ×{2}".format(query[0], query[1], count) for query, count in ordered[:MAX_COREDNS_QUERY_DETAILS]]
+    omitted = len(ordered) - len(details)
+    suffix = "; ещё {0} уникальных".format(omitted) if omitted else ""
+    return "{0} Запросы с ошибками: {1}{2}. Имена извлечены из {3}/{4} событий.".format(
+        summary,
+        "; ".join(details),
+        suffix,
+        identified,
+        len(events),
     )
 
 
@@ -286,8 +358,10 @@ def _service_dns_findings(node_snapshots, kubernetes):
     for index, service in enumerate(services):
         metadata = service.get("metadata", {}) or {}
         spec = service.get("spec", {}) or {}
-        selector = spec.get("selector") or {}
-        if spec.get("type") == "ExternalName" or not selector:
+        selector_present = spec.get("selectorPresent")
+        if selector_present is None:
+            selector_present = bool(spec.get("selector"))
+        if spec.get("type") == "ExternalName" or not selector_present:
             continue
         target = _object_target(service)
         key = (metadata.get("namespace"), metadata.get("name"))
@@ -355,17 +429,24 @@ def _service_dns_findings(node_snapshots, kubernetes):
             )
         )
 
-    dns_services = [service for service in services if (service.get("metadata") or {}).get("namespace") == "kube-system" and (service.get("metadata") or {}).get("name") == "kube-dns"]
+    dns_namespaces = ("d8-kube-dns", "kube-system")
+    dns_services = [
+        service
+        for service in services
+        if (service.get("metadata") or {}).get("namespace") in dns_namespaces
+        and (service.get("metadata") or {}).get("name") == "kube-dns"
+    ]
     dns_problems = []
     dns_evidence = ["kubernetes.json.gz#sources.services", "kubernetes.json.gz#sources.endpoint_slices"]
     if not dns_services:
-        dns_problems.append("kube-system/kube-dns Service отсутствует")
+        dns_problems.append("kube-dns Service отсутствует в d8-kube-dns и kube-system")
     else:
         dns_service = dns_services[0]
-        dns_key = ("kube-system", "kube-dns")
+        dns_namespace = (dns_service.get("metadata") or {}).get("namespace")
+        dns_key = (dns_namespace, "kube-dns")
         dns_endpoints = [endpoint for _index, item in slices_by_service.get(dns_key, []) for endpoint in item.get("endpoints", []) or []]
         if not any(_ready_endpoint(endpoint) for endpoint in dns_endpoints):
-            dns_problems.append("kube-system/kube-dns не имеет ready endpoints")
+            dns_problems.append("{0}/kube-dns не имеет ready endpoints".format(dns_namespace))
         service_ips = set(dns_service.get("spec", {}).get("clusterIPs") or [dns_service.get("spec", {}).get("clusterIP")])
         service_ips.discard(None)
         mismatches = []
@@ -392,7 +473,7 @@ def _service_dns_findings(node_snapshots, kubernetes):
         for pod in _kube_items(kubernetes, "pods"):
             metadata = pod.get("metadata", {}) or {}
             labels = metadata.get("labels", {}) or {}
-            if metadata.get("namespace") == "kube-system" and (
+            if metadata.get("namespace") in dns_namespaces and (
                 labels.get("k8s-app") == "kube-dns"
                 or labels.get("app.kubernetes.io/name") == "coredns"
                 or str(metadata.get("name") or "").startswith("coredns-")
@@ -402,6 +483,7 @@ def _service_dns_findings(node_snapshots, kubernetes):
             dns_problems.append("CoreDNS Pods отсутствуют")
         elif not any(
             pod.get("status", {}).get("phase") == "Running"
+            and bool(pod.get("status", {}).get("containerStatuses"))
             and all(status.get("ready") is True for status in pod.get("status", {}).get("containerStatuses", []) or [])
             for pod in dns_pods
         ):
@@ -414,7 +496,7 @@ def _service_dns_findings(node_snapshots, kubernetes):
                 "critical",
                 "Cluster DNS structural health нарушен",
                 "; ".join(dns_problems),
-                ["kube-system/kube-dns"],
+                [_object_target(dns_services[0]) if dns_services else "cluster-dns"],
                 dns_evidence,
                 "Проверить CoreDNS Pods/logs, kube-dns Service/EndpointSlice и затем resolv.conf Pod; active test Pod не создаётся автоматически.",
                 causal_confidence="high",
@@ -459,15 +541,27 @@ def _prometheus_findings(prometheus):
         alerts = [item for item in alerts_source.get("data", {}).get("alerts", []) if str(item.get("state")).lower() == "firing"]
         if alerts:
             affected = []
+            details = []
             for item in alerts[:100]:
                 labels = item.get("labels", {}) or {}
-                affected.append(labels.get("node") or labels.get("pod") or labels.get("namespace") or labels.get("alertname") or "cluster")
+                target = labels.get("node") or labels.get("pod") or labels.get("namespace") or labels.get("alertname") or "cluster"
+                affected.append(target)
+                annotations = item.get("annotations", {}) or {}
+                details.append(
+                    "{0}: state={1},activeAt={2},severity={3},message={4}".format(
+                        labels.get("alertname") or target,
+                        item.get("state"),
+                        item.get("activeAt") or "unknown",
+                        labels.get("severity") or "unknown",
+                        annotations.get("summary") or annotations.get("message") or "",
+                    )
+                )
             findings.append(
                 _finding(
                     "prometheus.alert_firing",
                     "warning",
                     "Prometheus содержит firing alerts",
-                    "Активных alerts: {0}; их правила и annotations считаются внешним evidence, а не встроенной диагностикой kdiag.".format(len(alerts)),
+                    "; ".join(details) + "; total={0}; alert rules и annotations считаются внешним evidence.".format(len(alerts)),
                     affected,
                     ["prometheus.json.gz#sources.alerts"],
                     "Сопоставить alert labels и activeAt с исходными bundles; проверить определение alert до вывода о причине.",
@@ -552,9 +646,10 @@ def _pod_workload_findings(collection, kubernetes):
                         "kubernetes.json.gz#sources.pods.items[{0}].status.{1}[{2}].state".format(pod_index, field, status_index)
                     )
                 restart_count = int(container.get("restartCount") or 0)
-                last_finished = _parse_snapshot_time(((container.get("lastState") or {}).get("terminated") or {}).get("finishedAt"))
+                last_finished_text = ((container.get("lastState") or {}).get("terminated") or {}).get("finishedAt")
+                last_finished = _parse_snapshot_time(last_finished_text)
                 if restart_count >= 5 and reference_time and last_finished and 0 <= (reference_time - last_finished).total_seconds() <= 3600:
-                    restart_storm.append("{0}:restarts={1}".format(container_target, restart_count))
+                    restart_storm.append("{0}:restartCount={1},lastFinishedAt={2}".format(container_target, restart_count, last_finished_text))
                     evidence.setdefault(container_target, []).append(
                         "kubernetes.json.gz#sources.pods.items[{0}].status.{1}[{2}]".format(pod_index, field, status_index)
                     )
@@ -563,7 +658,7 @@ def _pod_workload_findings(collection, kubernetes):
         (init_failed, "kubernetes.init_container_failed", "Init containers не завершились успешно", "Проверить init-container current/previous logs, exit code и зависимости до запуска application containers."),
         (nonzero, "kubernetes.container_exit_nonzero", "Containers завершились с ненулевым кодом", "Сопоставить exit code с termination reason и application logs; ненулевой код сам по себе не определяет инфраструктурную причину."),
         (evicted, "kubernetes.pod_evicted", "Pods были evicted", "Сопоставить Pod reason/message с Node pressure, requests и локальным ephemeral storage."),
-        (restart_storm, "kubernetes.pod_restart_storm", "Containers часто перезапускались в последний час", "Проверить lastState, previous logs, probes, OOM и runtime events."),
+        (restart_storm, "kubernetes.pod_restart_storm", "Containers имеют высокий cumulative restartCount и недавнее завершение", "Проверить lastState, previous logs, probes, OOM и runtime events; частота рестартов из одного snapshot неизвестна."),
     )
     for values, rule_id, title, recommendation in definitions:
         if not values:
@@ -599,7 +694,14 @@ def _pod_workload_findings(collection, kubernetes):
             workload_problems[kind].append(target)
         elif kind == "daemonset" and (status.get("numberMisscheduled") or 0) > 0:
             workload_problems[kind].append(target)
-        elif kind == "statefulset" and status.get("currentRevision") and status.get("updateRevision") and status.get("currentRevision") != status.get("updateRevision") and (status.get("updatedReplicas") or 0) < (spec.get("replicas") or 1):
+        elif kind == "statefulset" and any(
+            str(condition.get("status")) == "True"
+            and (
+                condition.get("type") in ("ReplicaFailure", "Failed")
+                or "fail" in str(condition.get("reason") or "").lower()
+            )
+            for condition in conditions
+        ):
             workload_problems[kind].append(target)
         elif kind == "job" and any(condition.get("type") == "Failed" and str(condition.get("status")) == "True" for condition in conditions):
             workload_problems[kind].append(target)
@@ -608,7 +710,7 @@ def _pod_workload_findings(collection, kubernetes):
     workload_rules = {
         "deployment": ("kubernetes.deployment_rollout_failed", "Deployment rollout завершился ошибкой"),
         "daemonset": ("kubernetes.daemonset_misscheduled", "DaemonSet имеет misscheduled Pods"),
-        "statefulset": ("kubernetes.statefulset_rollout_stalled", "StatefulSet rollout не завершён"),
+        "statefulset": ("kubernetes.statefulset_rollout_stalled", "StatefulSet rollout имеет явную failed condition"),
         "job": ("kubernetes.job_failed", "Job имеет condition Failed=True"),
     }
     for kind, values in workload_problems.items():
@@ -625,6 +727,8 @@ def _pdb_findings(kubernetes):
         return []
     unhealthy = []
     blocked = []
+    unhealthy_details = []
+    blocked_details = []
     unhealthy_evidence = []
     blocked_evidence = []
     for index, pdb in enumerate(_kube_items(kubernetes, "pdb")):
@@ -636,18 +740,28 @@ def _pdb_findings(kubernetes):
         target = _object_target(pdb)
         if expected > 0 and current < desired:
             unhealthy.append(target)
+            unhealthy_details.append(
+                "{0}: expectedPods={1},currentHealthy={2},desiredHealthy={3},disruptionsAllowed={4}".format(
+                    target, expected, current, desired, allowed
+                )
+            )
             unhealthy_evidence.append("kubernetes.json.gz#sources.pdb.items[{0}].status".format(index))
         if expected > 0 and "disruptionsAllowed" in status and allowed == 0:
             blocked.append(target)
+            blocked_details.append(
+                "{0}: expectedPods={1},currentHealthy={2},desiredHealthy={3},disruptionsAllowed=0".format(
+                    target, expected, current, desired
+                )
+            )
             blocked_evidence.append("kubernetes.json.gz#sources.pdb.items[{0}].status".format(index))
     findings = []
     if unhealthy:
         findings.append(
-            _finding("pdb.insufficient_healthy", "warning", "PDB имеет меньше healthy Pods, чем требуется", "Затронуто PDB: {0}.".format(len(unhealthy)), unhealthy, unhealthy_evidence, "Проверить соответствующие workload и Pods; PDB не изменять автоматически.", causal_confidence="high", classification="fact")
+            _finding("pdb.insufficient_healthy", "warning", "PDB имеет меньше healthy Pods, чем требуется", "; ".join(unhealthy_details[:100]), unhealthy, unhealthy_evidence, "Проверить соответствующие workload и Pods; PDB не изменять автоматически.", causal_confidence="high", classification="fact")
         )
     if blocked:
         findings.append(
-            _finding("pdb.disruption_blocked", "info", "PDB сейчас не разрешает voluntary disruptions", "disruptionsAllowed=0 у {0} PDB; это может быть нормальным состоянием.".format(len(blocked)), blocked, blocked_evidence, "Учитывать состояние перед drain/maintenance; само по себе оно не является отказом.", causal_confidence="none", classification="fact")
+            _finding("pdb.disruption_blocked", "info", "PDB сейчас не разрешает voluntary disruptions", "; ".join(blocked_details[:100]) + "; это может быть нормальным состоянием.", blocked, blocked_evidence, "Учитывать состояние перед drain/maintenance; само по себе оно не является отказом.", causal_confidence="none", classification="fact")
         )
     return findings
 
@@ -693,7 +807,10 @@ def _runtime_and_inventory_findings(collection, node_snapshots, kubernetes):
                 used_percent = int(parts[-2][:-1])
             except ValueError:
                 continue
-            relevant = any(mount == path or mount.startswith(path + "/") for path in ("/var/lib/kubelet", "/var/lib/containerd", "/var/lib/containers", "/var/log"))
+            relevant = mount != "/" and any(
+                mount == path or path.startswith(mount.rstrip("/") + "/")
+                for path in ("/var/lib/kubelet", "/var/lib/containerd", "/var/lib/containers", "/var/log")
+            )
             if relevant and used_percent >= 90:
                 mounts.append("{0}={1}%".format(mount, used_percent))
         if mounts:
@@ -722,9 +839,16 @@ def _runtime_and_inventory_findings(collection, node_snapshots, kubernetes):
                     if version:
                         api_versions.append(version)
     unsupported = []
+    mixed_api_versions = []
     if api_versions:
         oldest_api = min(api_versions)
         newest_api = max(api_versions)
+        if newest_api != oldest_api:
+            mixed_api_versions.append(
+                "kube-apiserver versions {0}.{1}..{2}.{3}".format(
+                    oldest_api[0], oldest_api[1], newest_api[0], newest_api[1]
+                )
+            )
         if newest_api[0] != oldest_api[0] or newest_api[1] - oldest_api[1] > 1:
             unsupported.append("kube-apiserver skew {0}.{1}..{2}.{3}".format(oldest_api[0], oldest_api[1], newest_api[0], newest_api[1]))
         for node in _kube_items(kubernetes, "nodes"):
@@ -733,8 +857,26 @@ def _runtime_and_inventory_findings(collection, node_snapshots, kubernetes):
             if not kubelet:
                 continue
             allowed_older = 2 if kubelet[1] < 25 else 3
-            if kubelet[0] != oldest_api[0] or kubelet[1] > oldest_api[1] or oldest_api[1] - kubelet[1] > allowed_older:
-                unsupported.append("{0}: kubelet {1}.{2}, oldest apiserver {3}.{4}".format(name, kubelet[0], kubelet[1], oldest_api[0], oldest_api[1]))
+            if kubelet[0] != oldest_api[0] or kubelet[1] > oldest_api[1] or newest_api[1] - kubelet[1] > allowed_older:
+                unsupported.append(
+                    "{0}: kubelet {1}.{2}, apiserver range {3}.{4}..{5}.{6}".format(
+                        name, kubelet[0], kubelet[1], oldest_api[0], oldest_api[1], newest_api[0], newest_api[1]
+                    )
+                )
+    if mixed_api_versions:
+        findings.append(
+            _finding(
+                "inventory.mixed_apiserver_versions",
+                "info",
+                "API server instances используют разные minor versions",
+                "; ".join(mixed_api_versions),
+                ["kube-apiserver"],
+                ["kubernetes.json.gz#sources.pods"],
+                "Проверить, что различие укладывается в version-skew policy и соответствует текущему этапу control-plane rollout.",
+                causal_confidence="none",
+                classification="fact",
+            )
+        )
     if unsupported:
         findings.append(_finding("inventory.unsupported_version_skew", "critical", "Компоненты Kubernetes имеют неподдерживаемый version skew", "; ".join(unsupported), unsupported, ["kubernetes.json.gz#sources.nodes", "kubernetes.json.gz#sources.pods"], "Планировать выравнивание версий по version-skew policy; minor upgrade kubelet выполнять после drain.", causal_confidence="high", classification="fact"))
     return findings
@@ -750,10 +892,12 @@ def _cilium_dns_dataplane_findings(node_snapshots, kubernetes, normalized):
     ]
     if coredns_events:
         severity = "critical" if any("dns_forward_loop" in event.get("categories", []) for event in coredns_events) else "warning"
-        findings.append(_event_finding("dns.coredns_errors", severity, "CoreDNS сообщает об ошибках resolution/forwarding", "Найдено событий: {0}.".format(len(coredns_events)), coredns_events, "Проверить CoreDNS forward targets, loop plugin, upstream reachability и resolver узлов.", confidence="high", classification="fact"))
+        findings.append(_event_finding("dns.coredns_errors", severity, "CoreDNS сообщает об ошибках resolution/forwarding", _coredns_error_summary(coredns_events), coredns_events, "Проверить имена запросов на опечатки и несуществующие zones, затем CoreDNS forward targets, loop plugin, upstream reachability и resolver узлов.", confidence="high", classification="fact"))
     coredns_config = kubernetes.get("sources", {}).get("coredns_config", {})
     if coredns_config.get("status") == "collected" and not coredns_config.get("data", {}).get("corefilePresent"):
-        findings.append(_finding("dns.coredns_config_empty", "critical", "CoreDNS ConfigMap не содержит Corefile", "ConfigMap kube-system/coredns доступен, но Corefile отсутствует или пуст.", ["kube-system/coredns"], ["kubernetes.json.gz#sources.coredns_config"], "Восстановить утверждённый Corefile по change procedure; kdiag конфигурацию не изменяет.", causal_confidence="high", classification="fact"))
+        metadata = coredns_config.get("data", {}).get("metadata", {}) or {}
+        target = "{0}/{1}".format(metadata.get("namespace") or "unknown", metadata.get("name") or "coredns")
+        findings.append(_finding("dns.coredns_config_empty", "critical", "CoreDNS ConfigMap не содержит Corefile", "ConfigMap {0} доступен, но Corefile отсутствует или пуст.".format(target), [target], ["kubernetes.json.gz#sources.coredns_config"], "Восстановить утверждённый Corefile по change procedure; kdiag конфигурацию не изменяет.", causal_confidence="high", classification="fact"))
 
     pods = _kube_items(kubernetes, "pods")
     kube_proxy_present = any(
@@ -763,7 +907,7 @@ def _cilium_dns_dataplane_findings(node_snapshots, kubernetes, normalized):
     )
     cilium_config = kubernetes.get("sources", {}).get("cilium_config", {})
     replacement = str(cilium_config.get("data", {}).get("data", {}).get("kube-proxy-replacement") or "").lower()
-    if cilium_config.get("status") == "collected" and not kube_proxy_present and replacement in ("false", "disabled"):
+    if _source_collected(kubernetes, "pods") and cilium_config.get("status") == "collected" and not kube_proxy_present and replacement in ("false", "disabled"):
         findings.append(_finding("cilium.kube_proxy_replacement_disabled", "critical", "Cilium kube-proxy replacement явно отключён", "kube-proxy Pods отсутствуют, kube-proxy-replacement={0!r}.".format(replacement), ["cluster"], ["kubernetes.json.gz#sources.cilium_config", "kubernetes.json.gz#sources.pods"], "Проверить effective Cilium KubeProxyReplacement на каждом agent; изменение выполнять только по процедуре Cilium rollout.", causal_confidence="high", classification="fact"))
 
     expected_frontends = []
@@ -783,7 +927,7 @@ def _cilium_dns_dataplane_findings(node_snapshots, kubernetes, normalized):
         command_id = None
         for candidate in ("cilium_debug_services", "cilium_services"):
             value = _json_command(snapshot, candidate)
-            if isinstance(value, dict) and isinstance(value.get("services"), list) and value.get("services"):
+            if isinstance(value, dict) and isinstance(value.get("services"), list):
                 document = value
                 command_id = candidate
                 break
@@ -1061,10 +1205,20 @@ def _storage_cilium_findings(kubernetes):
     findings = []
     if _source_collected(kubernetes, "pvc"):
         pending = []
+        pending_details = []
         evidence = []
         for index, pvc in enumerate(_kube_items(kubernetes, "pvc")):
             if pvc.get("status", {}).get("phase") == "Pending":
                 pending.append(_object_target(pvc))
+                status = pvc.get("status", {}) or {}
+                pending_details.append(
+                    "{0}: phase=Pending,reason={1},message={2},storageClass={3}".format(
+                        _object_target(pvc),
+                        status.get("reason") or "unknown",
+                        status.get("message") or "",
+                        (pvc.get("spec") or {}).get("storageClassName") or "default",
+                    )
+                )
                 evidence.append("kubernetes.json.gz#sources.pvc.items[{0}]".format(index))
         if pending:
             findings.append(
@@ -1072,7 +1226,7 @@ def _storage_cilium_findings(kubernetes):
                     "storage.pvc_pending",
                     "warning",
                     "PersistentVolumeClaim находится в Pending",
-                    "Pending PVC: {0}.".format(len(pending)),
+                    "; ".join(pending_details[:50]) + "; total={0}.".format(len(pending)),
                     pending,
                     evidence,
                     "Проверить Events, StorageClass, provisioner, WaitForFirstConsumer и topology; Pending сам по себе не определяет причину.",
@@ -1103,16 +1257,23 @@ def _storage_cilium_findings(kubernetes):
                 )
     if _source_collected(kubernetes, "pv"):
         failed = []
+        failed_details = []
         for pv in _kube_items(kubernetes, "pv"):
             if pv.get("status", {}).get("phase") == "Failed":
                 failed.append(_object_target(pv))
+                status = pv.get("status", {}) or {}
+                failed_details.append(
+                    "{0}: phase=Failed,reason={1},message={2}".format(
+                        _object_target(pv), status.get("reason") or "unknown", status.get("message") or ""
+                    )
+                )
         if failed:
             findings.append(
                 _finding(
                     "storage.pv_failed",
                     "critical",
                     "PersistentVolume находится в Failed",
-                    "Failed PV: {0}.".format(len(failed)),
+                    "; ".join(failed_details[:50]) + "; total={0}.".format(len(failed)),
                     failed,
                     ["kubernetes.json.gz#sources.pv"],
                     "Проверить PV reason/message, CSI controller и backend storage; reclaim operation не выполнять автоматически.",
@@ -1274,17 +1435,22 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
     for name, snapshot in node_snapshots.items():
         for command_id in required_commands:
             command = _command(snapshot, command_id)
-            if command and command.get("status") not in ("collected", "truncated"):
-                evidence_gaps.append("{0}/{1}:{2}".format(name, command_id, command.get("status")))
+            if command.get("status") != "collected" or command.get("truncated"):
+                status = "truncated" if command.get("truncated") else command.get("status") or "missing"
+                evidence_gaps.append("{0}/{1}:{2}".format(name, command_id, status))
                 evidence_gap_refs.append("node-{0}.json.gz#commands.{1}".format(name, command_id))
         pod_logs_status = snapshot.get("pod_logs", {}).get("status")
-        if pod_logs_status and pod_logs_status not in ("collected", "truncated", "unsupported"):
+        if pod_logs_status and pod_logs_status not in ("collected", "unsupported"):
             evidence_gaps.append("{0}/pod_logs:{1}".format(name, pod_logs_status))
             evidence_gap_refs.append("node-{0}.json.gz#pod_logs".format(name))
     for source_id, source in kubernetes.get("sources", {}).items():
         if source.get("required", True) and source.get("status") != "collected":
             evidence_gaps.append("kubernetes/{0}:{1}".format(source_id, source.get("status")))
             evidence_gap_refs.append("kubernetes.json.gz#sources.{0}".format(source_id))
+    logs_status = kubernetes.get("logs", {}).get("status")
+    if logs_status and logs_status not in ("collected", "disabled"):
+        evidence_gaps.append("kubernetes/logs:{0}".format(logs_status))
+        evidence_gap_refs.append("kubernetes.json.gz#logs")
     if evidence_gaps:
         findings.append(
             _finding(
@@ -1299,6 +1465,59 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
                 classification="fact",
             )
         )
+
+    if (normalized or {}).get("stats", {}).get("truncated"):
+        stats = normalized["stats"]
+        findings.append(
+            _finding(
+                "collector.normalization_truncated",
+                "warning",
+                "Нормализация evidence была усечена",
+                "Отброшено записей: {0}; candidate limit: {1}; output limit: {2}; по источникам: {3}.".format(
+                    stats.get("dropped_records", 0),
+                    stats.get("candidate_limit_drops", 0),
+                    stats.get("output_limit_drops", 0),
+                    stats.get("dropped_by_source", {}),
+                ),
+                ["cluster"],
+                ["normalized-events.json.gz#stats"],
+                "Увеличить лимиты только после оценки объёма или сузить окно сбора; зависимые выводы считать неполными.",
+                causal_confidence="none",
+                classification="fact",
+                missing_checks=["events omitted by normalization limits"],
+            )
+        )
+
+    if _source_collected(kubernetes, "nodes"):
+        inventory_names = set(node_snapshots)
+        inventory_names.update(
+            snapshot.get("host", {}).get("hostname")
+            for snapshot in node_snapshots.values()
+            if snapshot.get("host", {}).get("hostname")
+        )
+        kubernetes_names = set(
+            (item.get("metadata") or {}).get("name")
+            for item in _kube_items(kubernetes, "nodes")
+            if (item.get("metadata") or {}).get("name")
+        )
+        missing_snapshots = sorted(kubernetes_names - inventory_names)
+        missing_objects = sorted(set(node_snapshots) - kubernetes_names)
+        if missing_snapshots or missing_objects:
+            findings.append(
+                _finding(
+                    "inventory.node_set_mismatch",
+                    "warning",
+                    "Inventory и Kubernetes Node objects не совпадают",
+                    "Без node snapshot: {0}; без Kubernetes Node object: {1}.".format(
+                        ", ".join(missing_snapshots) or "none", ", ".join(missing_objects) or "none"
+                    ),
+                    missing_snapshots + missing_objects,
+                    ["collection.json#nodes", "kubernetes.json.gz#sources.nodes"],
+                    "Сверить inventory aliases, состав кластера и доступность SSH; не считать отсутствующий snapshot здоровым узлом.",
+                    causal_confidence="none",
+                    classification="fact",
+                )
+            )
 
     kernels = {}
     for name, snapshot in node_snapshots.items():
@@ -1539,10 +1758,18 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
     for index, workload in enumerate(_kube_items(kubernetes, "workloads")):
         kind = workload.get("kind")
         spec, status = workload.get("spec", {}), workload.get("status", {})
-        if kind in ("Deployment", "StatefulSet"):
+        if kind == "Deployment":
             desired = spec.get("replicas") if spec.get("replicas") is not None else 1
             ready = status.get("readyReplicas") or 0
             degraded = ready < desired
+        elif kind == "StatefulSet":
+            desired = spec.get("replicas") if spec.get("replicas") is not None else 1
+            ready = status.get("readyReplicas") or 0
+            degraded = any(
+                str(condition.get("status")) == "True"
+                and (condition.get("type") in ("ReplicaFailure", "Failed") or "fail" in str(condition.get("reason") or "").lower())
+                for condition in status.get("conditions", []) or []
+            )
         elif kind == "DaemonSet":
             desired = status.get("desiredNumberScheduled") or 0
             ready = status.get("numberReady") or 0
@@ -1550,7 +1777,10 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
         elif kind == "Job":
             desired = None
             ready = None
-            degraded = (status.get("failed") or 0) > 0 and not (status.get("succeeded") or 0)
+            degraded = any(
+                condition.get("type") == "Failed" and str(condition.get("status")) == "True"
+                for condition in status.get("conditions", []) or []
+            )
         else:
             degraded = False
         if degraded:
@@ -1569,13 +1799,14 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
                 "Сопоставить Pods и Events соответствующего workload; snapshot не выполняет rollout/restart.",
                 causal_confidence="high",
                 classification="fact",
+                missing_checks=["Pods and Events are required to determine the rollout failure mechanism"],
             )
         )
 
     disabled_ipv6 = []
     for name, snapshot in node_snapshots.items():
         values = snapshot.get("facts", {}).get("ipv6_disable", {})
-        if any(str(value) == "1" for value in values.values()):
+        if str(values.get("all")) == "1" or str(values.get("default")) == "1":
             disabled_ipv6.append(name)
     pod_ipv6 = []
     pod_ipv6_on_disabled = []
@@ -1611,7 +1842,10 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
             event.get("node") for event in _events(normalized, "address_family") if event.get("node")
         )
         mechanistic_error = bool(address_family_nodes & set(disabled_ipv6))
-        linked = mechanistic_error or bool(pod_ipv6_on_disabled)
+        linked = mechanistic_error or bool(pod_ipv6)
+        if not linked:
+            disabled_ipv6 = []
+    if disabled_ipv6:
         findings.append(
             _finding(
                 "network.ipv6_disabled",
@@ -1627,6 +1861,8 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
                 "Сопоставить effective sysctl с Pod IP family, Cilium routing и точным классом probe error; возвращать baseline только через change procedure.",
                 causal_confidence="medium" if linked else "none",
                 alternatives=["приложение не слушает порт", "Cilium route/endpoint", "перегрузка", "HTTP error readiness endpoint"],
+                counter_evidence=["IPv6 Pod addresses on unaffected nodes: {0}".format(len(pod_ipv6) - len(pod_ipv6_on_disabled))],
+                missing_checks=["effective address family and route on the affected workload node"],
                 classification="correlation" if mechanistic_error else "fact",
             )
         )
@@ -1714,17 +1950,27 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
     missing_controllers = []
     cgroup_denials = []
     kaspersky_nodes = []
+    kaspersky_packages = {}
+    cgroup_denial_excerpts = {}
     for name, snapshot in node_snapshots.items():
         cgroup = snapshot.get("facts", {}).get("cgroup", {})
         controllers = set(cgroup.get("controllers", []))
         if cgroup.get("mode") == "v2" and not {"cpu", "io"}.issubset(controllers):
             missing_controllers.append(name)
-        packages = _command(snapshot, "installed_packages").get("stdout", "").lower()
-        if "kesl" in packages or "kaspersky" in packages:
+        packages = _command(snapshot, "installed_packages").get("stdout", "")
+        package_lines = [
+            " ".join(line.split())[:500]
+            for line in packages.splitlines()
+            if "kesl" in line.lower() or "kaspersky" in line.lower()
+        ][:5]
+        if package_lines:
             kaspersky_nodes.append(name)
+            kaspersky_packages[name] = package_lines
         journal = _command(snapshot, "journal_services_current").get("stdout", "") + _command(snapshot, "journal_services_previous").get("stdout", "")
-        if CGROUP_DENIAL_RE.search(journal):
+        matched_lines = [" ".join(line.split())[:500] for line in journal.splitlines() if CGROUP_DENIAL_RE.search(line)][:5]
+        if matched_lines:
             cgroup_denials.append(name)
+            cgroup_denial_excerpts[name] = matched_lines
     if missing_controllers:
         findings.append(
             _finding(
@@ -1736,6 +1982,9 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
                 ["node-{0}.json.gz#facts.cgroup".format(name) for name in missing_controllers],
                 "Проверить kernel config, legacy v1 mounts, systemd delegation, runtime/cgroup driver и process mount namespaces.",
                 causal_confidence="low",
+                counter_evidence=["Отсутствие controller само по себе не является отказом kubelet/runtime"],
+                missing_checks=["fatal kubelet/runtime error for the missing controller", "effective cgroup namespace and delegation"],
+                classification="hypothesis",
             )
         )
     driver_mismatches = []
@@ -1766,14 +2015,24 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
         findings.append(
             _finding(
                 "security_agent.cgroup_denial",
-                "critical",
-                "На узле с KESL есть cgroup access errors",
-                "Совпадение версии агента и cgroup denial ещё не доказывает блокировку Kaspersky.",
+                "warning",
+                "На узле с KESL обнаружен отдельный cgroup access error",
+                "; ".join(
+                    "{0}: package={1}; journal={2}".format(
+                        name,
+                        " | ".join(kaspersky_packages.get(name, [])),
+                        " | ".join(cgroup_denial_excerpts.get(name, [])),
+                    )
+                    for name in linked_kaspersky
+                ),
                 linked_kaspersky,
                 ["node-{0}.json.gz#commands.journal_services_current".format(name) for name in linked_kaspersky],
                 "Сопоставить точные errno/path с DAC/SELinux/systemd sandboxing и vendor/audit event; сверить exact KESL build и compatibility matrix.",
                 causal_confidence="medium",
                 alternatives=["DAC/ACL", "SELinux/LSM", "systemd hardening", "cgroup driver mismatch", "kernel/runtime incompatibility"],
+                counter_evidence=["Совместное присутствие package и denial не устанавливает инициатора блокировки"],
+                missing_checks=["matched KESL audit event", "vendor compatibility for the exact package build"],
+                classification="correlation",
             )
         )
 
@@ -1814,15 +2073,24 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
     certificate_evidence = []
     if reference_time:
         for name, snapshot in node_snapshots.items():
+            rotation_target = snapshot.get("facts", {}).get("kubelet_certificate_rotation", {}).get("target")
             for index, certificate in enumerate(snapshot.get("facts", {}).get("certificates", [])):
+                path = str(certificate.get("path") or "")
+                basename = path.rsplit("/", 1)[-1]
+                if (
+                    path.startswith("/var/lib/kubelet/pki/")
+                    and re.match(r"^kubelet-client-.*\.pem$", basename)
+                    and basename != rotation_target
+                ):
+                    continue
                 not_after = _parse_certificate_date(certificate.get("metadata"))
                 if not not_after:
                     continue
                 days = (not_after - reference_time).total_seconds() / 86400.0
                 if days < 0:
-                    expired.setdefault(name, []).append(certificate.get("path"))
+                    expired.setdefault(name, []).append(path)
                 elif days <= 30:
-                    expiring.setdefault(name, []).append((certificate.get("path"), int(days)))
+                    expiring.setdefault(name, []).append((path, int(days)))
                 else:
                     continue
                 certificate_evidence.append("node-{0}.json.gz#facts.certificates[{1}]".format(name, index))
@@ -1915,8 +2183,7 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
         if not definition:
             continue
         rule_id, severity, title, recommendation = definition
-        findings.append(
-            _finding(
+        finding = _finding(
                 rule_id,
                 severity,
                 title,
@@ -1931,7 +2198,16 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
                 causal_confidence="medium",
                 classification="correlation",
             )
+        finding.update(
+            {
+                "episode_id": correlation.get("episode_id"),
+                "started_at": correlation.get("started_at"),
+                "ended_at": correlation.get("ended_at"),
+                "duration_seconds": correlation.get("duration_seconds"),
+                "window_seconds": correlation.get("window_seconds"),
+            }
         )
+        findings.append(finding)
 
     severity_order = {"critical": 0, "warning": 1, "info": 2}
     if collection.get("options", {}).get("collect_cgroup", True) is False:
