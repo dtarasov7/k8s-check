@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-08-27
+
+### Fixed
+
+- Cilium discovery now associates CRI containers with Pod sandboxes and recognizes vanilla `kube-system/cilium-*` Pods and Deckhouse `d8-cni-cilium/agent-*` Pods with the `cilium-agent` container. Container CLI lookup tries names and standard absolute paths for `cilium`, `cilium-dbg`, and `cilium-debug`; a successful fallback no longer leaves equivalent missing-host-binary failures in the report.
+- If `crictl exec` into etcd is unavailable, read-only checks are retried with the binary from that exact running container rootfs through a validated `/proc/<pid>/root` path. A host `etcdctl` in `PATH` remains a fallback; unsafe broad searches across arbitrary image layers are not used.
+
 ## [0.9.0] - 2026-08-27
 
 ### Added

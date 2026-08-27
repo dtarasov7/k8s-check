@@ -349,6 +349,7 @@ def _cilium_container_fallback(commands, timeout_seconds, max_command_bytes):
     if status_available and services_available:
         return []
     crictl = shutil.which("crictl")
+    pods_record = command_by_id.get("runtime_crictl_pods", {})
     runtime_record = command_by_id.get("runtime_crictl_containers", {})
     if not crictl or runtime_record.get("status") != "collected":
         return []
@@ -356,22 +357,42 @@ def _cilium_container_fallback(commands, timeout_seconds, max_command_bytes):
         containers = json.loads(runtime_record.get("stdout", "")).get("containers", [])
     except (AttributeError, TypeError, ValueError):
         return []
+    pod_sandboxes = {}
+    if pods_record.get("status") == "collected":
+        try:
+            pods = json.loads(pods_record.get("stdout", "")).get("items", [])
+        except (AttributeError, TypeError, ValueError):
+            pods = []
+        for pod in pods if isinstance(pods, list) else []:
+            metadata = pod.get("metadata", {}) or {}
+            sandbox_id = str(pod.get("id") or "")
+            namespace = str(metadata.get("namespace") or "")
+            pod_name = str(metadata.get("name") or "")
+            if sandbox_id:
+                pod_sandboxes[sandbox_id] = (namespace, pod_name)
     candidates = []
     for container in containers if isinstance(containers, list) else []:
         metadata = container.get("metadata", {}) or {}
         name = str(metadata.get("name") or "").lower()
         container_id = str(container.get("id") or "")
+        sandbox_id = str(container.get("podSandboxId") or "")
+        namespace, pod_name = pod_sandboxes.get(sandbox_id, ("", ""))
+        recognized_pod = (
+            namespace == "kube-system" and pod_name.startswith("cilium-")
+        ) or (
+            namespace == "d8-cni-cilium" and pod_name.startswith("agent-")
+        )
         state = str(container.get("state") or "").lower()
         if (
-            (name == "cilium" or "cilium-agent" in name)
+            (recognized_pod or name == "cilium" or "cilium-agent" in name)
             and state in ("container_running", "running")
             and re.fullmatch(r"[A-Za-z0-9_.:-]{8,256}", container_id)
         ):
-            candidates.append((container_id, name))
+            candidates.append((0 if recognized_pod else 1, namespace, pod_name, container_id, name))
     if not candidates:
         return []
 
-    container_id, container_name = sorted(candidates)[0]
+    _priority, namespace, pod_name, container_id, container_name = sorted(candidates)[0]
     specifications = []
     if not status_available:
         specifications.append(("cilium_debug_status", ["status", "--output", "json"], "internal", False))
@@ -379,7 +400,16 @@ def _cilium_container_fallback(commands, timeout_seconds, max_command_bytes):
         specifications.append(("cilium_debug_services", ["service", "list", "--output", "json"], "confidential", True))
     replacements = []
     for command_id, arguments, sensitivity, project_services in specifications:
-        for binary in ("cilium-dbg", "cilium-debug", "cilium"):
+        for binary in (
+            "cilium-dbg",
+            "/usr/bin/cilium-dbg",
+            "/bin/cilium-dbg",
+            "cilium-debug",
+            "/usr/bin/cilium-debug",
+            "cilium",
+            "/usr/bin/cilium",
+            "/bin/cilium",
+        ):
             result = run_process(
                 [crictl, "exec", container_id, binary] + arguments,
                 min(timeout_seconds, 15),
@@ -395,9 +425,23 @@ def _cilium_container_fallback(commands, timeout_seconds, max_command_bytes):
             record["transport"] = "crictl"
             record["container"] = container_name
             record["binary"] = binary
+            record["pod"] = "{0}/{1}".format(namespace, pod_name) if namespace and pod_name else None
             replacements.append(_project_cilium_services(record) if project_services else record)
             break
     return replacements
+
+
+def _apply_cilium_fallback(commands, replacements):
+    result = list(commands)
+    equivalent_ids = {
+        "cilium_debug_status": {"cilium_debug_status", "cilium_status"},
+        "cilium_debug_services": {"cilium_debug_services", "cilium_services"},
+    }
+    for replacement in replacements:
+        superseded = equivalent_ids.get(replacement.get("id"), {replacement.get("id")})
+        result = [item for item in result if item.get("id") not in superseded]
+        result.append(replacement)
+    return result
 
 
 def _filtered_command(record):
@@ -606,6 +650,58 @@ def _certificate_metadata(timeout_seconds, max_command_bytes, max_certificates=1
     return records
 
 
+def _all_collected(commands):
+    return bool(commands) and all(item.get("status") == "collected" for item in commands)
+
+
+def _run_etcd_checks(prefix, ca_path, cert_path, key_path, timeout_seconds, max_command_bytes):
+    common = list(prefix) + [
+        "--endpoints=https://127.0.0.1:2379",
+        "--cacert={0}".format(ca_path),
+        "--cert={0}".format(cert_path),
+        "--key={0}".format(key_path),
+        "--dial-timeout=5s",
+        "--command-timeout={0}s".format(max(5, timeout_seconds)),
+    ]
+    specifications = (
+        ("etcd_endpoint_status", ["endpoint", "status", "--cluster", "--write-out=json"]),
+        ("etcd_endpoint_health", ["endpoint", "health", "--cluster", "--write-out=json"]),
+        ("etcd_alarm_list", ["alarm", "list", "--write-out=json"]),
+    )
+    commands = []
+    for check_id, arguments in specifications:
+        result = run_process(common + arguments, timeout_seconds, max_command_bytes)
+        commands.append(result.record(check_id, sensitivity="confidential"))
+    return commands
+
+
+def _container_root_executable(crictl, container_id, name, timeout_seconds, max_command_bytes):
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{8,256}", str(container_id or "")):
+        return None
+    inspected = run_process(
+        [crictl, "inspect", container_id],
+        timeout_seconds,
+        min(max_command_bytes, 1024 * 1024),
+    )
+    if inspected.returncode != 0 or inspected.truncated:
+        return None
+    try:
+        document = json.loads(inspected.stdout.decode("utf-8"))
+        pid = int((document.get("info") or {}).get("pid"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if pid <= 1:
+        return None
+    for path in ("/usr/bin/{0}", "/usr/local/bin/{0}", "/bin/{0}"):
+        candidate = Path("/proc/{0}/root{1}".format(pid, path.format(name)))
+        try:
+            if candidate.is_file() and os.access(str(candidate), os.X_OK):
+                return str(candidate)
+        except OSError:
+            continue
+    return None
+
+
 def _etcd_snapshot(
     enabled,
     timeout_seconds,
@@ -634,8 +730,7 @@ def _etcd_snapshot(
 
     etcd_timeout = min(timeout_seconds, 15)
     commands = []
-    prefix = None
-    transport = None
+    container_id = None
     crictl = shutil.which("crictl")
     if crictl:
         discovery_result = run_process(
@@ -647,47 +742,76 @@ def _etcd_snapshot(
         commands.append(discovery)
         container_ids = [line.strip() for line in discovery.get("stdout", "").splitlines() if line.strip()]
         if discovery.get("status") == "collected" and container_ids:
-            transport = "crictl"
-            prefix = [crictl, "exec", container_ids[0], "etcdctl"]
-    if prefix is None:
-        executable = shutil.which("etcdctl")
-        if executable:
-            transport = "host"
-            prefix = [executable]
-        elif crictl:
+            container_id = container_ids[0]
+
+    attempts = []
+    if crictl and container_id:
+        attempts.append(
+            (
+                "crictl",
+                _run_etcd_checks(
+                    [crictl, "exec", container_id, "etcdctl"],
+                    ca_path,
+                    cert_path,
+                    key_path,
+                    etcd_timeout,
+                    max_command_bytes,
+                ),
+            )
+        )
+
+    executable = shutil.which("etcdctl")
+    executable_transport = "host"
+    if not executable and crictl and container_id and attempts and not _all_collected(attempts[0][1]):
+        executable = _container_root_executable(
+            crictl,
+            container_id,
+            "etcdctl",
+            etcd_timeout,
+            max_command_bytes,
+        )
+        executable_transport = "host-container-root"
+    if executable and (not attempts or not _all_collected(attempts[0][1])):
+        attempts.append(
+            (
+                executable_transport,
+                _run_etcd_checks(
+                    [executable],
+                    ca_path,
+                    cert_path,
+                    key_path,
+                    etcd_timeout,
+                    max_command_bytes,
+                ),
+            )
+        )
+
+    if not attempts:
+        if crictl:
             return {
                 "status": "unavailable",
                 "transport": "crictl",
                 "commands": commands,
                 "error": "running etcd container not found and host etcdctl is unavailable",
             }
-        else:
-            return {"status": "unsupported", "commands": [], "error": "neither crictl nor etcdctl found"}
+        return {"status": "unsupported", "commands": [], "error": "neither crictl nor etcdctl found"}
 
-    common = prefix + [
-        "--endpoints=https://127.0.0.1:2379",
-        "--cacert={0}".format(ca_path),
-        "--cert={0}".format(cert_path),
-        "--key={0}".format(key_path),
-        "--dial-timeout=5s",
-        "--command-timeout={0}s".format(max(5, etcd_timeout)),
-    ]
-    specifications = (
-        ("etcd_endpoint_status", ["endpoint", "status", "--cluster", "--write-out=json"]),
-        ("etcd_endpoint_health", ["endpoint", "health", "--cluster", "--write-out=json"]),
-        ("etcd_alarm_list", ["alarm", "list", "--write-out=json"]),
+    transport, selected_commands = max(
+        attempts,
+        key=lambda attempt: sum(item.get("status") == "collected" for item in attempt[1]),
     )
-    for check_id, arguments in specifications:
-        result = run_process(common + arguments, etcd_timeout, max_command_bytes)
-        commands.append(result.record(check_id, sensitivity="confidential"))
-    statuses = [item.get("status") for item in commands if item.get("id") != "etcd_container_discovery"]
+    commands.extend(selected_commands)
+    statuses = [item.get("status") for item in selected_commands]
     if statuses and all(status == "collected" for status in statuses):
         status = "collected"
     elif any(status == "collected" for status in statuses):
         status = "partial"
     else:
         status = "unavailable"
-    return {"status": status, "transport": transport, "quota_backend_bytes": quota_backend_bytes, "commands": commands}
+    value = {"status": status, "transport": transport, "quota_backend_bytes": quota_backend_bytes, "commands": commands}
+    if attempts[0][0] == "crictl" and transport != "crictl":
+        value["fallback_from"] = "crictl"
+    return value
 
 
 def _tail_regular_file(path, count):
@@ -773,9 +897,10 @@ def collect_node_snapshot(since_hours, timeout_seconds, max_command_bytes, syste
     for check_id, argv, sensitivity in _command_specs(since_hours):
         record = run_check(check_id, argv, timeout_seconds, max_command_bytes, sensitivity=sensitivity)
         commands.append(_filtered_command(record))
-    for replacement in _cilium_container_fallback(commands, timeout_seconds, max_command_bytes):
-        commands = [item for item in commands if item.get("id") != replacement.get("id")]
-        commands.append(replacement)
+    commands = _apply_cilium_fallback(
+        commands,
+        _cilium_container_fallback(commands, timeout_seconds, max_command_bytes),
+    )
     service_states = _service_states(timeout_seconds, max_command_bytes)
     etcd = _etcd_snapshot(collect_etcd, timeout_seconds, max_command_bytes)
     commands.extend(etcd.pop("commands"))

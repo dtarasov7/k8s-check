@@ -2,7 +2,7 @@
 
 ## 1. Purpose and scope
 
-<code>kdiag 0.9.0</code> creates a one-time emergency snapshot of a Kubernetes cluster and performs deterministic, fully offline analysis. Its current diagnostic compatibility scope is vanilla Kubernetes and Deckhouse CSE Pro 1.74 with Kubernetes 1.24–1.31, up to 20 nodes and about 1,000 Pods. This describes evidence/rule compatibility, not lifecycle support.
+<code>kdiag 0.9.1</code> creates a one-time emergency snapshot of a Kubernetes cluster and performs deterministic, fully offline analysis. Its current diagnostic compatibility scope is vanilla Kubernetes and Deckhouse CSE Pro 1.74 with Kubernetes 1.24–1.31, up to 20 nodes and about 1,000 Pods. This describes evidence/rule compatibility, not lifecycle support.
 
 The program runs on a separate management server. It connects to every node over SSH, runs read-only inspection through non-interactive sudo, and queries the Kubernetes API using a dedicated kubeconfig. Prometheus is optional: the snapshot still works when Prometheus or the entire Kubernetes API is unavailable.
 
@@ -86,9 +86,9 @@ Read-only stacked kubeadm etcd inspection is attempted only with these standard 
 /etc/kubernetes/pki/etcd/healthcheck-client.key
 ~~~
 
-The collector first uses crictl to invoke etcdctl inside the already running local etcd container, which matches Deckhouse static Pods, and falls back to host etcdctl for vanilla layouts. External etcd and non-standard layouts produce an evidence-gap result rather than an invented diagnosis.
+The collector first uses crictl to invoke etcdctl inside the already running local etcd container, which matches Deckhouse static Pods. If container exec fails, it obtains that container PID through CRI and uses the standard etcdctl path below `/proc/<pid>/root`; a host etcdctl remains another fallback. An arbitrary binary from an unrelated containerd snapshot is never executed. External etcd and non-standard layouts produce an evidence-gap result rather than an invented diagnosis.
 
-For Cilium, host `cilium`, `cilium-dbg`, and `cilium-debug` commands are tried first. If they are unavailable, the same bounded read-only status and service-list commands are run through crictl in a running `cilium-agent` container. Kubernetes `pods/exec` permission is not required.
+For Cilium, host `cilium`, `cilium-dbg`, and `cilium-debug` commands are tried first. If they are unavailable, the same bounded read-only status and service-list commands are run through crictl. CRI discovery recognizes `cilium-*` in `kube-system` for Cilium 1.14 and `agent-*` in `d8-cni-cilium` with the `cilium-agent` container for Deckhouse/Cilium 1.17; both CLI names and standard absolute paths are tried inside the container. Kubernetes `pods/exec` permission is not required.
 
 ## 5. Build, test, and offline transfer
 
