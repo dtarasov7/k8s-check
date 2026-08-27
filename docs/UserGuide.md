@@ -2,7 +2,7 @@
 
 ## 1. Purpose and scope
 
-<code>kdiag 0.8.0</code> creates a one-time emergency snapshot of a Kubernetes cluster and performs deterministic, fully offline analysis. Its current diagnostic compatibility scope is vanilla Kubernetes and Deckhouse CSE Pro 1.74 with Kubernetes 1.24–1.31, up to 20 nodes and about 1,000 Pods. This describes evidence/rule compatibility, not lifecycle support.
+<code>kdiag 0.8.1</code> creates a one-time emergency snapshot of a Kubernetes cluster and performs deterministic, fully offline analysis. Its current diagnostic compatibility scope is vanilla Kubernetes and Deckhouse CSE Pro 1.74 with Kubernetes 1.24–1.31, up to 20 nodes and about 1,000 Pods. This describes evidence/rule compatibility, not lifecycle support.
 
 The program runs on a separate management server. It connects to every node over SSH, runs read-only inspection through non-interactive sudo, and queries the Kubernetes API using a dedicated kubeconfig. Prometheus is optional: the snapshot still works when Prometheus or the entire Kubernetes API is unavailable.
 
@@ -358,11 +358,15 @@ Each run creates <code>&lt;output&gt;/&lt;collection-id&gt;/</code>:
 
 Inventory aliases and Kubernetes Node names may differ. Unambiguous hostname/FQDN and unique short-name matches are canonicalized to the Kubernetes Node name for Node-scoped correlation; ambiguous identities remain visible as a mismatch.
 
-Coverage is recorded for every node command, node Pod-log group, Kubernetes source, and Kubernetes log entry. A collected parent bundle does not hide an inner `failed`, `timeout`, or `truncated` check. `facts.json`, `findings.json`, and `report.json` include a rule evaluation ledger: `matched`, `not_matched`, `unknown` with missing evidence, or `not_applicable`. Each rule declares its own coverage requirements, so a failed Events query affects event-dependent rules but not a Node-condition rule whose Nodes source was collected. Treat `unknown` as an explicit rule-specific evidence gap, not as a healthy result.
+Completeness is recorded for every node command, node Pod-log group, Kubernetes source, and Kubernetes log entry. A collected parent bundle does not hide an inner `failed`, `timeout`, or `truncated` check. `facts.json`, `findings.json`, and `report.json` retain stable machine statuses. The Markdown report translates them, groups identical node failures, and omits the full per-rule table. Each rule declares its own source requirements, so a failed Events query affects event-dependent rules but not a Node-condition rule whose Nodes source was collected.
 
-The Markdown ledger includes the actual missing-source status and groups the same unavailable command across nodes. Its leading cause summary explains why many rules are `unknown`; for example, one unavailable Kubernetes API snapshot can affect every rule that requires Nodes, Pods, Events, or workloads. If Kubernetes collection was intentionally disabled, dependent rules are `not_applicable` instead. Even an `unreachable` Kubernetes bundle is read to retain its per-source failure details.
+The Markdown result summary explains why checks could not run and how many rules depend on each missing source; the complete technical list remains in `report.json`. If Kubernetes collection was intentionally disabled, dependent rules are marked not applicable. Even an unreachable Kubernetes bundle is read to retain its per-source failure details.
 
-The offline message-insight section is informational rather than a finding. Its embedded, versioned catalogue classifies recognized templates as `routine`, `observe`, `actionable`, or `security`; shows the occurrence range, first/last timestamps, rate, affected Nodes/Pods, explanation, decision condition, recommendation, and static reference URLs; and correlates available Pod readiness/restarts, Events, readyz, EndpointSlices, and categorized journal errors. Counter-evidence and unavailable checks are explicit. No LLM, network, or external API is used. A card cannot recover evidence that was not collected and must not be read as proof of impact or causality.
+The embedded catalogue still classifies recognized templates as routine, observe, actionable, or security. Routine/observe entries remain in confidential `normalized-events.json.gz`; only actionable/security entries without a duplicate deterministic finding are shown in `report.md` and `report.json`. No LLM, network, or external API is used.
+
+For Deckhouse authentication config, node collection records only file metadata for `/etc/kubernetes/deckhouse/extra-files/authentication-config.yaml`, never its contents. A log record proves a read error only at that timestamp. The report separately checks current host-file presence, API readyz, and kube-apiserver Pod readiness and warns that visibility inside the container mount namespace is not directly verified.
+
+Current-boot journals are requested newest-first. If `collection.max_command_bytes` truncates them, the newest incident-near records are retained. Increase that limit or reduce `collection.since_hours` when the report shows truncation.
 
 The remaining unknown-fingerprint section is also informational. It shows a component-balanced subset of at most five templates per component, limits long templates, and preserves placeholders such as `<n>` and `<ipv6>` in readable code formatting. Approximate counts are displayed as a guaranteed minimum and estimated upper bound with algorithmic error, not as severity. The complete bounded set remains in `normalized-events.json.gz`.
 

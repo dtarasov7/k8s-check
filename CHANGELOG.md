@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-08-27
+
+### Changed
+
+- Reworked `report.md` as an operator-facing Russian report: technical English labels were replaced, findings now lead with what was detected, what it means, what contradicts it, what remains unchecked, and what to do.
+- Routine and observe message cards are no longer emitted to `report.md` or `report.json`; they remain available in confidential `normalized-events.json.gz`. Finding-backed authentication-config and ptrace cards are also hidden to avoid duplicate sections.
+- Successful collection checks and identical per-node failures are compacted in Markdown. Detailed source coverage and per-rule evaluation records remain unchanged in JSON.
+
+### Fixed
+
+- Current journal collection now requests newest records first. When the byte limit is reached, kdiag retains the incident-nearest end of the requested window instead of its oldest records.
+- The collector records metadata—not contents—for Deckhouse authentication config. The related finding distinguishes a historical/transient read error from a currently missing file using host file presence, API readyz, and kube-apiserver Pod readiness, while explicitly noting that container mount visibility is not directly checked.
+- Truncated-journal findings are grouped by source and node count and recommend the exact `collection.max_command_bytes` / `collection.since_hours` controls instead of printing every node path.
+
 ## [0.8.0] - 2026-08-26
 
 ### Added

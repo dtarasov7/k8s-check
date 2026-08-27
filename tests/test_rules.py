@@ -24,6 +24,27 @@ def node_snapshot(kernel, ipv6="0"):
 
 
 class RulesTest(unittest.TestCase):
+    def test_truncated_journals_have_concise_actionable_collection_gap(self):
+        nodes = {}
+        collection_nodes = []
+        for node_name in ("node-a", "node-b"):
+            snapshot = node_snapshot("6.1")
+            snapshot["commands"] = [
+                {"id": "journal_services_current", "status": "truncated", "truncated": True},
+                {"id": "journal_kernel_current", "status": "collected", "truncated": False},
+            ]
+            snapshot["pod_logs"] = {"status": "collected", "entries": []}
+            nodes[node_name] = snapshot
+            collection_nodes.append({"host": node_name, "status": "collected"})
+        finding = next(
+            item for item in evaluate_rules({"nodes": collection_nodes}, nodes, {})
+            if item["rule_id"] == "collector.evidence_gap"
+        )
+        self.assertEqual("служебный журнал текущей загрузки: усечён лимитом размера (2)", finding["summary"])
+        self.assertIn("collection.max_command_bytes", finding["recommendation"])
+        self.assertIn("collection.since_hours", finding["recommendation"])
+        self.assertNotIn("node-a/journal", finding["summary"])
+
     def test_new_troubleshooting_rules_use_read_only_evidence(self):
         kubernetes = {
             "collected_at": "2026-01-01T00:10:00Z",
@@ -140,17 +161,49 @@ class RulesTest(unittest.TestCase):
             ],
             "correlations": [],
         }
-        rule_ids = {
-            item["rule_id"]
-            for item in evaluate_rules(
-                {"nodes": []},
-                {},
-                {},
-                normalized,
-            )
+        nodes = {
+            "node-1": {
+                "facts": {
+                    "authentication_config_files": [
+                        {
+                            "path": "/etc/kubernetes/deckhouse/extra-files/authentication-config.yaml",
+                            "status": "present",
+                            "regular_file": True,
+                            "readable": True,
+                        }
+                    ]
+                }
+            }
         }
+        kubernetes = {
+            "sources": {
+                "api_readyz": {"status": "collected", "data": {"checks": [{"name": "etcd", "status": "passed"}]}},
+                "pods": {
+                    "status": "collected",
+                    "data": {
+                        "items": [
+                            {
+                                "metadata": {"namespace": "kube-system", "name": "kube-apiserver-node-1"},
+                                "spec": {"containers": [{"name": "kube-apiserver"}]},
+                                "status": {
+                                    "phase": "Running",
+                                    "containerStatuses": [{"name": "kube-apiserver", "ready": True, "restartCount": 0}],
+                                },
+                            }
+                        ]
+                    },
+                },
+            }
+        }
+        findings = evaluate_rules({"nodes": []}, nodes, kubernetes, normalized)
+        rule_ids = {item["rule_id"] for item in findings}
         self.assertIn("controlplane.authentication_config_read_error", rule_ids)
         self.assertIn("security_agent.ptrace_alert", rule_ids)
+        auth = next(item for item in findings if item["rule_id"] == "controlplane.authentication_config_read_error")
+        self.assertIn("в момент записи", auth["summary"])
+        self.assertTrue(any("существует сейчас" in value for value in auth["counter_evidence"]))
+        self.assertTrue(any("readyz" in value for value in auth["counter_evidence"]))
+        self.assertIn("не подтверждено", auth["recommendation"])
 
     def test_runtime_service_detection_supports_deckhouse_and_ignores_not_found(self):
         snapshot = node_snapshot("6.1")

@@ -6,6 +6,7 @@ from kdiag.report import (
     RULE_COVERAGE_REQUIREMENTS,
     _compact_missing_evidence,
     _coverage,
+    _coverage_display_rows,
     _rule_ledger,
     _render_message_insights,
     _select_unknown_fingerprints,
@@ -17,11 +18,27 @@ from kdiag.util import atomic_write_gzip_json, atomic_write_json, markdown_code,
 
 
 class ReportTest(unittest.TestCase):
+    def test_coverage_display_groups_same_node_problem(self):
+        rows = _coverage_display_rows(
+            [
+                {"source": "node/node-a/command/journal_services_current", "status": "truncated", "required": True},
+                {"source": "node/node-b/command/journal_services_current", "status": "truncated", "required": True},
+                {"source": "node/node-a/command/uname", "status": "collected", "required": False},
+            ]
+        )
+        self.assertEqual(1, len(rows))
+        self.assertIn("служебный журнал текущей загрузки: 2 узл.", rows[0]["display_source"])
+
     def test_message_insight_render_explains_estimates_and_decision_context(self):
         lines = []
         _render_message_insights(
             lines,
             [
+                {
+                    "insight_id": "routine-demo",
+                    "category": "routine",
+                    "title": "Конфигурация Nginx не изменилась",
+                },
                 {
                     "insight_id": "demo",
                     "category": "actionable",
@@ -45,12 +62,15 @@ class ReportTest(unittest.TestCase):
             ],
         )
         rendered = "\n".join(lines)
-        self.assertIn("Офлайн-разбор сообщений", rendered)
+        self.assertIn("Сообщения, требующие внимания", rendered)
+        self.assertNotIn("Конфигурация Nginx не изменилась", rendered)
         self.assertIn("гарантированно не менее 3, оценочная верхняя граница 4", rendered)
-        self.assertIn("Контр-доказательства: readyz healthy", rendered)
-        self.assertIn("Условие решения: Решить при повторении", rendered)
+        self.assertIn("Что говорит против текущей проблемы: readyz healthy", rendered)
+        self.assertIn("Когда требуется действие: Решить при повторении", rendered)
         self.assertIn("`failure code <n>`", rendered)
         self.assertNotIn("&lt;", rendered)
+        for unwanted in ("triage", "findings", "Counter-evidence", "Missing checks", "first seen", "rate"):
+            self.assertNotIn(unwanted, rendered)
 
     def test_markdown_uses_readable_angle_brackets_and_balanced_unknowns(self):
         self.assertEqual(r"\<n\>", markdown_escape("<n>"))
@@ -218,8 +238,14 @@ class ReportTest(unittest.TestCase):
             self.assertTrue(ledger["kubernetes.failed_scheduling"]["missing_evidence"])
             self.assertFalse(report["options"]["collect_cgroup"])
             self.assertEqual("disabled", report["node_inventory"][0]["cgroup_mode"])
-            self.assertIn("Cgroup checks: **disabled**", (root / "report.md").read_text(encoding="utf-8"))
-            self.assertIn("Rule ID:", (root / "report.md").read_text(encoding="utf-8"))
+            markdown = (root / "report.md").read_text(encoding="utf-8")
+            self.assertIn("Проверки cgroup: **отключены**", markdown)
+            self.assertIn("Идентификатор проверки:", markdown)
+            self.assertIn("Что обнаружено:", markdown)
+            self.assertIn("Что это означает:", markdown)
+            self.assertIn("Что делать:", markdown)
+            for unwanted in ("Rule ID:", "Evidence:", "Counter-evidence:", "Missing checks:", "## Findings", "ledger", "coverage"):
+                self.assertNotIn(unwanted, markdown)
 
 
 if __name__ == "__main__":

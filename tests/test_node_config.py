@@ -2,10 +2,25 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kdiag.node import KUBELET_CONFIG_KEYS, SERVICE_UNITS, _allowlisted_top_level_config, _command_specs, _kubelet_certificate_rotation, _project_cri_records, _resolv_conf_facts
+from kdiag.node import KUBELET_CONFIG_KEYS, SERVICE_UNITS, _allowlisted_top_level_config, _authentication_config_files, _command_specs, _kubelet_certificate_rotation, _project_cri_records, _resolv_conf_facts
 
 
 class NodeConfigTest(unittest.TestCase):
+    def test_current_journals_keep_newest_records_when_size_limited(self):
+        commands = {check_id: argv for check_id, argv, _sensitivity in _command_specs(24)}
+        self.assertIn("--reverse", commands["journal_services_current"])
+        self.assertIn("--reverse", commands["journal_kernel_current"])
+
+    def test_authentication_config_probe_collects_metadata_not_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "authentication-config.yaml"
+            path.write_text("secret-value", encoding="utf-8")
+            result = _authentication_config_files((str(path), str(path.parent / "missing.yaml")))
+        self.assertEqual("present", result[0]["status"])
+        self.assertTrue(result[0]["regular_file"])
+        self.assertEqual("absent", result[1]["status"])
+        self.assertNotIn("secret-value", __import__("json").dumps(result))
+
     def test_deckhouse_containerd_is_collected_like_other_runtimes(self):
         self.assertIn("containerd-deckhouse.service", SERVICE_UNITS)
         journal = {check_id: argv for check_id, argv, _sensitivity in _command_specs(24)}["journal_services_current"]

@@ -1,4 +1,4 @@
-RULE_PACK_VERSION = "2026.08.10"
+RULE_PACK_VERSION = "2026.08.11"
 
 
 SOURCES = {
@@ -50,7 +50,7 @@ def _entry(title, classification, sources, description):
 
 RULE_CATALOG = {
     "collector.node_gap": _entry("Неполный node snapshot", "fact", ("systemd_journal",), "Один или несколько узлов не были собраны."),
-    "collector.evidence_gap": _entry("Неполные обязательные журналы", "fact", ("systemd_journal", "k8s_logging"), "Обязательный журнал завершился ошибкой, timeout или permission failure."),
+    "collector.evidence_gap": _entry("Часть обязательных данных собрана не полностью", "fact", ("systemd_journal", "k8s_logging"), "Один или несколько обязательных журналов или источников Kubernetes завершились ошибкой, превысили лимит времени либо были усечены по размеру."),
     "collector.normalization_truncated": _entry("Нормализация усечена", "fact", ("k8s_logging",), "Лимит нормализации отбросил часть категоризированных событий; зависимые правила имеют evidence gap."),
     "collector.boot_changed": _entry("Перезагрузка во время сбора", "fact", ("systemd_journal",), "Boot ID изменился между началом и концом node snapshot."),
     "inventory.mixed_kernel": _entry("Разные ядра", "fact", ("k8s_124", "k8s_131"), "Инвентаризационный drift, сам по себе не являющийся неисправностью."),
@@ -83,7 +83,7 @@ RULE_CATALOG = {
     "dns.kube_dns_unavailable": _entry("Cluster DNS недоступен", "fact", ("k8s_dns",), "kube-dns Service, ready endpoints или CoreDNS Pods отсутствуют/нездоровы."),
     "dns.cluster_dns_mismatch": _entry("kubelet clusterDNS не совпадает с Service", "fact", ("k8s_dns",), "Явный clusterDNS kubelet отличается от ClusterIP kube-dns Service."),
     "controlplane.api_readyz_failed": _entry("API server readyz failed", "fact", ("k8s_api_health",), "Raw /readyz или одна из его проверок завершилась ошибкой."),
-    "controlplane.authentication_config_read_error": _entry("Ошибка чтения authentication config API server", "fact", ("k8s_auth_config",), "kube-apiserver сообщает, что настроенный authentication config нельзя прочитать; влияние и длительность проверяются отдельно."),
+    "controlplane.authentication_config_read_error": _entry("В журнале API server была ошибка чтения authentication config", "fact", ("k8s_auth_config",), "Запись подтверждает ошибку чтения в конкретный момент, но не доказывает текущее отсутствие файла или недоступность API server. Текущее состояние проверяется отдельно."),
     "controlplane.apiservice_unavailable": _entry("Aggregated APIService недоступен", "fact", ("k8s_apiservice",), "APIService condition Available имеет False или Unknown."),
     "controlplane.node_lease_stale": _entry("Node Lease отсутствует или отстаёт", "correlation", ("k8s_leases", "k8s_nodes"), "Node Lease отсутствует либо существенно отстаёт от свежей peer Lease."),
     "controlplane.static_pod_unhealthy": _entry("Control-plane static Pod нездоров", "fact", ("k8s_api_health", "k8s_debug_pods"), "etcd/apiserver/scheduler/controller-manager Pod не Running или container не Ready."),

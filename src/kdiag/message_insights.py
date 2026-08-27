@@ -23,9 +23,9 @@ MESSAGE_INSIGHT_CATALOG = (
         r"kubelet",
         r"unable to retrieve (?:some )?(?:image )?pull secret",
         "kubelet не получил image pull Secret",
-        "Образ ещё может запуститься из cache, через другой credential или без авторизации; сообщение фиксирует риск следующего pull, а не автоматически текущий отказ Pod.",
-        "Расследовать немедленно при ImagePullBackOff/ErrImagePull, FailedToRetrieveImagePullSecret, неготовом Pod или остановившемся rollout; при Running/Ready оставить как латентный риск.",
-        "Сопоставить Pod state, Events и imagePullSecrets; содержимое Secret не читать и не включать в kdiag bundle.",
+        "Образ ещё может запуститься из локального кэша, с другими учётными данными или без авторизации. Сообщение указывает на риск следующего скачивания образа, но само по себе не означает отказ Pod.",
+        "Проверять немедленно при ImagePullBackOff/ErrImagePull, FailedToRetrieveImagePullSecret, неготовом Pod или остановившемся обновлении; при Running/Ready считать скрытым риском.",
+        "Сопоставить состояние Pod, события Kubernetes и imagePullSecrets; содержимое Secret не читать и не включать в набор kdiag.",
         (
             "https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/",
             "https://github.com/kubernetes/kubernetes/issues/128544",
@@ -37,9 +37,9 @@ MESSAGE_INSIGHT_CATALOG = (
         r"(?:proxy|nginx)",
         r"upstream server temporarily disabled while",
         "Nginx временно исключил upstream",
-        "Предыдущая попытка соединения или обмена с backend завершилась ошибкой. Одиночная запись может быть transient; повторение вместе с failed readyz, неготовым endpoint или network errors указывает на влияние.",
-        "Расследовать при failed API readyz, неготовом совпавшем EndpointSlice, connection refused/timeout/no route либо пользовательских 5xx.",
-        "Проверить соседнюю исходную nginx error-строку, target endpoint, readyz и сетевые события в том же окне.",
+        "Предыдущая попытка соединения с целевым сервером завершилась ошибкой. Одиночная запись может быть кратковременной; повторение вместе с неуспешным readyz, неготовым EndpointSlice или сетевыми ошибками указывает на возможное влияние.",
+        "Проверять при неуспешном API readyz, неготовом совпавшем EndpointSlice, отказе соединения, превышении времени ожидания, отсутствии маршрута либо пользовательских ответах 5xx.",
+        "Проверить соседнюю исходную строку ошибки Nginx, целевой адрес, readyz и сетевые события в том же временном окне.",
     ),
     _entry(
         "ipv6_link_ready",
@@ -277,7 +277,7 @@ def _component_pod_check(insight, kubernetes):
         metadata = pod.get("metadata", {}) or {}
         target = "{0}/{1}".format(metadata.get("namespace") or "unknown", metadata.get("name") or "unknown")
         phase, ready, restarts, waiting = _pod_status(pod)
-        detail = "{0}: phase={1}, ready={2}, restarts={3}, waiting={4}".format(target, phase, ready, restarts, ",".join(waiting) or "none")
+        detail = "{0}: состояние={1}, готов={2}, перезапусков={3}, ожидание={4}".format(target, phase, ready, restarts, ",".join(waiting) or "нет")
         if phase not in (None, "Running") or not ready or waiting:
             problems.append(detail)
         else:
@@ -287,7 +287,7 @@ def _component_pod_check(insight, kubernetes):
         _add_check(insight, "component_pod_state", "problem", "; ".join(problems[:10]), evidence)
     elif healthy:
         _add_check(insight, "component_pod_state", "healthy", "; ".join(healthy[:10]), evidence)
-        insight["counter_evidence"].append("Связанные component Pods в snapshot имеют Running/Ready.")
+        insight["counter_evidence"].append("Связанные Pod компонентов в снимке имеют состояние Running/Ready.")
 
 
 def _pull_secret_checks(insight, kubernetes):
@@ -314,8 +314,8 @@ def _pull_secret_checks(insight, kubernetes):
             phase, ready, restarts, waiting = _pod_status(pod)
             pull_secrets = pod.get("spec", {}).get("imagePullSecrets") or []
             details.append(
-                "{0}: phase={1}, ready={2}, restarts={3}, waiting={4}, imagePullSecrets={5}".format(
-                    target, phase, ready, restarts, ",".join(waiting) or "none", ",".join(str(value) for value in pull_secrets) or "none"
+                "{0}: состояние={1}, готов={2}, перезапусков={3}, ожидание={4}, imagePullSecrets={5}".format(
+                    target, phase, ready, restarts, ",".join(waiting) or "нет", ",".join(str(value) for value in pull_secrets) or "нет"
                 )
             )
             evidence.append("kubernetes.json.gz#sources.pods.items[{0}]".format(index))
@@ -326,7 +326,7 @@ def _pull_secret_checks(insight, kubernetes):
         if details:
             _add_check(insight, "pod_state", "problem" if problem else "healthy" if healthy else "observe", "; ".join(details), evidence)
         else:
-            insight["missing_checks"].append("Pod from kubelet message is absent from the collected Pod snapshot")
+            insight["missing_checks"].append("Pod из сообщения kubelet отсутствует в собранном снимке Pod")
 
     event_status = _source_status(kubernetes, "events")
     if event_status != "collected":
@@ -344,7 +344,7 @@ def _pull_secret_checks(insight, kubernetes):
         if matches:
             _add_check(insight, "kubernetes_events", "problem", "; ".join(matches[:20]), evidence)
         else:
-            _add_check(insight, "kubernetes_events", "healthy", "В собранном Events нет совпавшего image-pull failure.")
+            _add_check(insight, "kubernetes_events", "healthy", "В собранных событиях Kubernetes нет совпавшей ошибки скачивания образа.")
             insight["counter_evidence"].append("Нет совпавшего FailedToRetrieveImagePullSecret/ImagePull event в собранном окне.")
     insight["missing_checks"].append("Существование и содержимое Secret не проверяются: kdiag не запрашивает Secrets.")
 
@@ -376,15 +376,15 @@ def _related_event_check(insight, normalized, categories, name):
             insight,
             name,
             "problem",
-            "Related categories: {0}; events={1}.".format(", ".join(sorted(found_categories)), len(matches)),
+            "Связанные категории: {0}; событий: {1}.".format(", ".join(sorted(found_categories)), len(matches)),
             evidence,
         )
     elif (normalized or {}).get("stats", {}).get("truncated"):
-        _add_check(insight, name, "observe", "Связанных ошибок среди сохранённых событий не найдено, но normalization output усечён.")
-        insight["missing_checks"].append("normalized events are truncated; absence of a related event is not counter-evidence")
+        _add_check(insight, name, "observe", "Связанных ошибок среди сохранённых событий не найдено, но результат обработки журналов усечён.")
+        insight["missing_checks"].append("Обработанные события усечены; отсутствие связанной записи не опровергает проблему")
     else:
-        _add_check(insight, name, "healthy", "Связанных категоризированных ошибок в том же Node/time scope не найдено.")
-        insight["counter_evidence"].append("Нет связанных {0} в собранном Node/time scope.".format(name))
+        _add_check(insight, name, "healthy", "Связанных распознанных ошибок на том же узле и в том же временном окне не найдено.")
+        insight["counter_evidence"].append("Нет связанных ошибок типа {0} на том же узле и в том же временном окне.".format(name))
 
 
 def _readyz_check(insight, kubernetes):
@@ -399,12 +399,12 @@ def _readyz_check(insight, kubernetes):
             insight,
             "api_readyz",
             "problem",
-            "Failed checks: {0}.".format(", ".join(str(item.get("name")) for item in failed[:20])),
+            "Неуспешные проверки: {0}.".format(", ".join(str(item.get("name")) for item in failed[:20])),
             ("kubernetes.json.gz#sources.api_readyz",),
         )
     else:
-        _add_check(insight, "api_readyz", "healthy", "Собранный API readyz не содержит failed checks.", ("kubernetes.json.gz#sources.api_readyz",))
-        insight["counter_evidence"].append("API readyz не содержит failed checks.")
+        _add_check(insight, "api_readyz", "healthy", "Проверка готовности API server не содержит ошибок.", ("kubernetes.json.gz#sources.api_readyz",))
+        insight["counter_evidence"].append("Проверка готовности API server не содержит ошибок.")
 
 
 def _endpoint_check(insight, kubernetes):
@@ -416,7 +416,7 @@ def _endpoint_check(insight, kubernetes):
     for example in insight.get("examples", []):
         upstream_ips.update(value.strip("[]") for value in UPSTREAM_IP_RE.findall(str(example.get("message") or "")))
     if not upstream_ips:
-        insight["missing_checks"].append("Upstream address was not retained in bounded examples")
+        insight["missing_checks"].append("Адрес целевого сервера не сохранился в ограниченном наборе примеров")
         return
     matched = []
     evidence = []
@@ -430,16 +430,16 @@ def _endpoint_check(insight, kubernetes):
             if not overlap:
                 continue
             ready = (endpoint.get("conditions") or {}).get("ready")
-            matched.append("{0}: addresses={1}, ready={2}".format(service_name, ",".join(overlap), ready))
+            matched.append("{0}: адреса={1}, готов={2}".format(service_name, ",".join(overlap), ready))
             evidence.append("kubernetes.json.gz#sources.endpoint_slices.items[{0}]".format(index))
             if ready is False:
                 problem = True
     if matched:
         _add_check(insight, "endpoint_state", "problem" if problem else "healthy", "; ".join(matched[:20]), evidence)
         if not problem:
-            insight["counter_evidence"].append("Совпавший upstream присутствует в ready EndpointSlice.")
+            insight["counter_evidence"].append("Целевой адрес присутствует в готовом EndpointSlice.")
     else:
-        _add_check(insight, "endpoint_state", "observe", "Upstream address не найден среди собранных EndpointSlice.")
+        _add_check(insight, "endpoint_state", "observe", "Целевой адрес не найден среди собранных EndpointSlice.")
 
 
 def _kesl_service_check(insight, node_snapshots):

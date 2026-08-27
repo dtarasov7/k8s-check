@@ -133,7 +133,7 @@ Every run creates a separate directory:
   manifest.json
 ```
 
-`report.md` starts with a coverage matrix and explicitly shows unavailable, failed, timed-out, and truncated inner checks even when their parent bundle was collected. The rule ledger distinguishes a clean non-match from `unknown` caused by evidence required by that specific rule and from `not_applicable`; an unrelated log/source gap does not invalidate every rule in the same broad component group. Rebuild derived output with:
+`report.md` is an operator-facing Russian summary. It groups identical per-node source failures, counts successful sources instead of listing every one, and explains each issue as: what was detected, what it means, contradicting data, unavailable checks, and the next action. Complete per-source coverage and per-rule evaluation records remain in `report.json`. Rebuild derived output with:
 
 ```bash
 python3.8 dist/kdiag.pyz report /var/lib/kdiag/<collection-id>
@@ -157,7 +157,7 @@ python3.8 dist/kdiag.pyz rules list
 python3.8 dist/kdiag.pyz rules explain kubernetes.node_not_ready
 ```
 
-`normalized-events.json.gz` contains deduplicated categorized events, independent scoped correlation episodes, explicit truncation/drop counters by source, offline message-insight cards, and bounded approximate heavy hitters for unknown fingerprints. Recognized cards explain common messages and correlate only evidence already present in the snapshot; they are not findings and do not use an LLM, network, or external API. The Markdown report keeps placeholders such as `<n>` readable and describes approximate frequency as a guaranteed minimum plus an estimated upper bound. Original messages remain confidential evidence; do not transfer this file outside the trusted environment without a separate redaction review.
+`normalized-events.json.gz` contains deduplicated categorized events, independent scoped correlation episodes, explicit truncation/drop counters by source, offline message-insight cards, and bounded approximate heavy hitters for unknown fingerprints. Recognized cards explain common messages and correlate only data already present in the snapshot; they are not findings and do not use an LLM, network, or external API. Routine/observe cards stay in this machine-readable confidential file; only actionable/security cards without a duplicate finding enter the operator report. Original messages remain confidential; do not transfer this file outside the trusted environment without a separate redaction review.
 
 Kubernetes API audit logs are not collected, including Deckhouse-specific audit backends. They are not exposed through a portable read-only Kubernetes API, may contain sensitive request or response data, and can be very large. Adding them safely requires a separate explicit opt-in with deployment-specific paths/backends, strict byte and time limits, and dedicated redaction; their absence from the snapshot is therefore intentional rather than a coverage error.
 

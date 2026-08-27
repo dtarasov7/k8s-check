@@ -419,16 +419,180 @@ def _select_unknown_fingerprints(values, limit=20, per_component=5):
     return selected, max(0, len(values) - len(selected))
 
 
+STATUS_LABELS = {
+    "collected": "собрано",
+    "partial": "собрано частично",
+    "failed": "ошибка",
+    "error": "ошибка",
+    "timeout": "превышено время ожидания",
+    "truncated": "усечено лимитом",
+    "unsupported": "недоступно на узле",
+    "unreachable": "источник недоступен",
+    "source_unavailable": "источник недоступен",
+    "permission_denied": "нет прав",
+    "missing": "не собрано",
+    "disabled": "отключено",
+    "not_configured": "не настроено",
+    "matched": "проблема обнаружена",
+    "not_matched": "проблема не обнаружена",
+    "unknown": "не удалось проверить",
+    "not_applicable": "не применяется",
+    "problem": "обнаружена проблема",
+    "healthy": "признаков проблемы нет",
+    "observe": "нужно наблюдение",
+}
+
+SEVERITY_LABELS = {
+    "critical": "КРИТИЧНО",
+    "warning": "ПРЕДУПРЕЖДЕНИЕ",
+    "info": "СВЕДЕНИЕ",
+}
+
+CLASSIFICATION_LABELS = {
+    "fact": "зафиксированный факт",
+    "correlation": "совпадение признаков по времени и объекту",
+    "hypothesis": "предположение, требующее проверки",
+}
+
+INSIGHT_CATEGORY_LABELS = {
+    "actionable": "ТРЕБУЕТ ВНИМАНИЯ",
+    "security": "БЕЗОПАСНОСТЬ",
+}
+
+DECISION_STATE_LABELS = {
+    "investigate": "проверить сейчас",
+    "security_review": "передать на проверку безопасности",
+    "monitor": "наблюдать",
+}
+
+SOURCE_LABELS = {
+    "journal_services_current": "служебный журнал текущей загрузки",
+    "journal_services_previous": "служебный журнал предыдущей загрузки",
+    "journal_kernel_current": "журнал ядра текущей загрузки",
+    "journal_kernel_previous": "журнал ядра предыдущей загрузки",
+    "pod_logs": "локальные журналы контейнеров",
+    "nodes": "объекты Node",
+    "pods": "объекты Pod",
+    "events": "события Kubernetes",
+    "workloads": "состояние рабочих нагрузок",
+    "services": "объекты Service",
+    "endpoint_slices": "объекты EndpointSlice",
+    "api_readyz": "готовность API server",
+    "logs": "журналы системных Pod",
+}
+
+FINDING_BACKED_INSIGHTS = frozenset(("authentication_config_read_error", "ptrace_attack_attempt"))
+
+
+def _status_label(value):
+    return STATUS_LABELS.get(str(value or "missing"), str(value or "неизвестно"))
+
+
+def _confidence_label(value):
+    return {
+        "high": "высокая",
+        "medium": "средняя",
+        "low": "низкая",
+        "none": "причина не установлена",
+    }.get(str(value or "none"), str(value or "не указана"))
+
+
+def _source_label(value):
+    text = str(value or "неизвестный источник")
+    match = re.match(r"^node/([^/]+)/command/([^/]+)$", text)
+    if match:
+        return "Узел {0}: {1}".format(match.group(1), SOURCE_LABELS.get(match.group(2), "команда {0}".format(match.group(2))))
+    match = re.match(r"^node/([^/]+)/pod_logs$", text)
+    if match:
+        return "Узел {0}: {1}".format(match.group(1), SOURCE_LABELS["pod_logs"])
+    match = re.match(r"^node/([^/]+)$", text)
+    if match:
+        return "Узел {0}".format(match.group(1))
+    match = re.match(r"^kubernetes/(.+)$", text)
+    if match:
+        return "Kubernetes: {0}".format(SOURCE_LABELS.get(match.group(1), match.group(1)))
+    if text == "kubernetes":
+        return "Kubernetes API"
+    if text == "prometheus":
+        return "Prometheus"
+    return text
+
+
+def _coverage_display_rows(values):
+    grouped = {}
+    rows = []
+    for item in values or []:
+        if item.get("status") == "collected":
+            continue
+        source = str(item.get("source") or "")
+        node_match = re.match(r"^node/([^/]+)/(command/[^/]+|pod_logs)$", source)
+        log_match = re.match(r"^kubernetes/logs/\d+$", source)
+        if node_match:
+            key = (node_match.group(2), item.get("status"), item.get("error"), item.get("required", True))
+            grouped.setdefault(key, []).append(node_match.group(1))
+        elif log_match:
+            key = ("kubernetes_log_entry", item.get("status"), item.get("error"), item.get("required", True))
+            grouped.setdefault(key, []).append(source.rsplit("/", 1)[-1])
+        else:
+            rows.append(dict(item, display_source=_source_label(source)))
+    for source_id, status, error, required in sorted(grouped, key=lambda key: tuple(str(value) for value in key)):
+        members = grouped[(source_id, status, error, required)]
+        if source_id.startswith("command/"):
+            label = SOURCE_LABELS.get(source_id.split("/", 1)[1], "команда {0}".format(source_id.split("/", 1)[1]))
+            display_source = "{0}: {1} узл. ({2})".format(label, len(members), ", ".join(sorted(members)[:10]))
+        elif source_id == "pod_logs":
+            display_source = "{0}: {1} узл. ({2})".format(SOURCE_LABELS["pod_logs"], len(members), ", ".join(sorted(members)[:10]))
+        else:
+            display_source = "Записи журналов Kubernetes: {0}".format(len(members))
+        if len(members) > 10:
+            display_source += "; ещё {0}".format(len(members) - 10)
+        rows.append(
+            {
+                "source": source_id,
+                "display_source": display_source,
+                "status": status,
+                "error": error,
+                "required": required,
+            }
+        )
+    return sorted(rows, key=lambda item: (str(item.get("status")), str(item.get("display_source"))))
+
+
+def _human_gap(value):
+    text = str(value)
+    match = re.match(r"^node/\*/command/([^:]+):([^ ]+) \((\d+) nodes?\)$", text)
+    if match:
+        return "{0}: {1} на {2} узл.".format(
+            SOURCE_LABELS.get(match.group(1), "команда {0}".format(match.group(1))),
+            _status_label(match.group(2)),
+            match.group(3),
+        )
+    match = re.match(r"^node/\*/pod_logs:([^ ]+) \((\d+) nodes?\)$", text)
+    if match:
+        return "{0}: {1} на {2} узл.".format(SOURCE_LABELS["pod_logs"], _status_label(match.group(1)), match.group(2))
+    if ":" in text:
+        source, status = text.rsplit(":", 1)
+        return "{0}: {1}".format(_source_label(source), _status_label(status))
+    return _source_label(text)
+
+
+def _report_message_insights(values):
+    return [
+        value for value in (values or [])
+        if value.get("category") in INSIGHT_CATEGORY_LABELS
+        and value.get("insight_id") not in FINDING_BACKED_INSIGHTS
+    ]
+
+
 def _render_message_insights(lines, values, limit=30):
-    insights = list(values or [])
+    insights = _report_message_insights(values)
     if not insights:
         return
     lines.extend(
         [
-            "## Офлайн-разбор сообщений",
+            "## Сообщения, требующие внимания",
             "",
-            "Это локальные triage-карточки из встроенного каталога, а не автоматически созданные findings. "
-            "Для них не используются LLM, Интернет или внешние API.",
+            "Здесь показаны только сообщения, для которых может требоваться действие. Штатные информационные сообщения скрыты; полный машинный список остаётся в `normalized-events.json.gz`.",
             "",
         ]
     )
@@ -450,38 +614,38 @@ def _render_message_insights(lines, values, limit=30):
             else:
                 rate_text = "{0}..{1}/ч".format(rate["minimum"], rate["maximum"])
         else:
-            rate_text = "недостаточно точных timestamp"
+            rate_text = "недостаточно точных отметок времени"
         nodes = insight.get("affected_nodes") or []
         pods = insight.get("affected_pods") or []
         scope_suffix = "; список ограничен" if insight.get("scope_truncated") else ""
         lines.extend(
             [
                 "### [{0}] {1}".format(
-                    markdown_escape(insight.get("category") or "observe"),
+                    INSIGHT_CATEGORY_LABELS.get(insight.get("category"), "НАБЛЮДЕНИЕ"),
                     markdown_escape(insight.get("title") or insight.get("insight_id") or "message"),
                 ),
                 "",
-                "Состояние решения: **{0}**. Компонент: {1}.".format(
-                    markdown_escape(insight.get("decision_state") or "monitor"),
-                    markdown_code(insight.get("component") or "unknown"),
+                "Решение: **{0}**. Компонент: {1}.".format(
+                    markdown_escape(DECISION_STATE_LABELS.get(insight.get("decision_state"), "наблюдать")),
+                    markdown_code(insight.get("component") or "неизвестно"),
                 ),
                 "",
                 "Шаблон: {0}".format(markdown_code(_bounded_report_text(insight.get("template")))),
                 "",
-                "Частота: {0}; first seen: {1}; last seen: {2}; наблюдаемое окно: {3} с; rate: {4}; inferred timestamps: {5}.".format(
+                "Частота: {0}; первая запись: {1}; последняя запись: {2}; наблюдаемое окно: {3} с; средняя частота: {4}; записей без точного времени: {5}.".format(
                     occurrence_text,
-                    markdown_escape(insight.get("first_seen") or "unknown"),
-                    markdown_escape(insight.get("last_seen") or "unknown"),
+                    markdown_escape(insight.get("first_seen") or "неизвестно"),
+                    markdown_escape(insight.get("last_seen") or "неизвестно"),
                     markdown_escape(
                         insight.get("observed_span_seconds")
                         if insight.get("observed_span_seconds") is not None
-                        else "unknown"
+                        else "неизвестно"
                     ),
                     markdown_escape(rate_text),
                     markdown_escape(insight.get("inferred_time_samples", 0)),
                 ),
                 "",
-                "Затронутые Node: {0} ({1}); Pod: {2} ({3}){4}.".format(
+                "Затронутые узлы: {0} ({1}); Pod: {2} ({3}){4}.".format(
                     markdown_escape(", ".join(nodes) or "не определены"),
                     insight.get("affected_nodes_count", len(nodes)),
                     markdown_escape(", ".join(pods) or "не определены"),
@@ -495,15 +659,15 @@ def _render_message_insights(lines, values, limit=30):
         )
         checks = insight.get("checks") or []
         if checks:
-            lines.extend(["Локальные проверки:", ""])
+            lines.extend(["Что проверено автоматически:", ""])
             for check in checks[:20]:
                 evidence = check.get("evidence") or []
-                evidence_text = "; evidence: {0}".format(
+                evidence_text = "; исходные данные: {0}".format(
                     ", ".join(markdown_code(value) for value in evidence)
                 ) if evidence else ""
                 lines.append(
                     "- [{0}] {1}: {2}{3}".format(
-                        markdown_escape(check.get("status") or "observe"),
+                        markdown_escape(_status_label(check.get("status") or "observe")),
                         markdown_code(check.get("name") or "check"),
                         markdown_escape(check.get("summary") or ""),
                         evidence_text,
@@ -512,17 +676,17 @@ def _render_message_insights(lines, values, limit=30):
             lines.append("")
         lines.extend(
             [
-                "Контр-доказательства: {0}.".format(
-                    markdown_escape("; ".join(insight.get("counter_evidence") or []) or "не обнаружены в доступном snapshot")
+                "Что говорит против текущей проблемы: {0}.".format(
+                    markdown_escape("; ".join(insight.get("counter_evidence") or []) or "в собранных данных ничего не найдено")
                 ),
                 "",
-                "Недостающие проверки: {0}.".format(
+                "Что не удалось проверить: {0}.".format(
                     markdown_escape("; ".join(insight.get("missing_checks") or []) or "нет явно указанных")
                 ),
                 "",
-                "Условие решения: {0}".format(markdown_escape(insight.get("decision_condition") or "нет")),
+                "Когда требуется действие: {0}".format(markdown_escape(insight.get("decision_condition") or "не указано")),
                 "",
-                "Рекомендация: {0}".format(markdown_escape(insight.get("recommendation") or "нет")),
+                "Что делать: {0}".format(markdown_escape(insight.get("recommendation") or "действие не указано")),
                 "",
             ]
         )
@@ -530,7 +694,7 @@ def _render_message_insights(lines, values, limit=30):
         if sources:
             lines.extend(
                 [
-                    "Справочные источники (сохранённые URL, при анализе сеть не используется): {0}.".format(
+                    "Справочные материалы (URL сохранены в программе, сеть при анализе не используется): {0}.".format(
                         ", ".join("[источник {0}]({1})".format(index + 1, value) for index, value in enumerate(sources))
                     ),
                     "",
@@ -572,6 +736,7 @@ def build_report(collection_dir):
     normalized["message_insights"] = enrich_message_insights(
         normalized.get("message_insights", []), nodes, kubernetes, normalized
     )
+    report_message_insights = _report_message_insights(normalized.get("message_insights", []))
     findings = evaluate_rules(collection, nodes, kubernetes, normalized, prometheus)
     node_inventory = [_node_row(name, snapshot) for name, snapshot in sorted(nodes.items())]
     coverage = _coverage(collection, nodes, kubernetes)
@@ -606,6 +771,7 @@ def build_report(collection_dir):
             "stats": normalized.get("stats", {}),
             "correlation_count": len(normalized.get("correlations", [])),
             "message_insight_count": len(normalized.get("message_insights", [])),
+            "message_insights_requiring_attention": len(report_message_insights),
             "unknown_fingerprint_count": len(normalized.get("unknown_fingerprints", [])),
         },
         "coverage": coverage,
@@ -628,7 +794,7 @@ def build_report(collection_dir):
         "coverage": coverage,
         "node_inventory": node_inventory,
         "findings": findings,
-        "message_insights": normalized.get("message_insights", []),
+        "message_insights": report_message_insights,
         "rule_evaluation_ledger": ledger,
         "prometheus_status": prometheus.get("status") if prometheus else collection.get("prometheus", {}).get("status"),
         "normalization": facts["normalization"],
@@ -642,30 +808,39 @@ def build_report(collection_dir):
     lines = [
         "# Аварийный снимок Kubernetes",
         "",
-        "Collection ID: `{0}`".format(markdown_escape(report["collection_id"])),
+        "Идентификатор сбора: `{0}`".format(markdown_escape(report["collection_id"])),
         "",
-        "Статус: **{0}**".format(markdown_escape(report["status"])),
+        "Статус сбора: **{0}**".format(markdown_escape(_status_label(report["status"]))),
         "",
-        "Cgroup checks: **{0}**".format("enabled" if report["options"]["collect_cgroup"] else "disabled"),
+        "Проверки cgroup: **{0}**".format("включены" if report["options"]["collect_cgroup"] else "отключены"),
         "",
-        "Etcd checks: **{0}**".format("enabled" if report["options"]["collect_etcd"] else "disabled"),
+        "Проверки etcd: **{0}**".format("включены" if report["options"]["collect_etcd"] else "отключены"),
         "",
-        "## Полнота сбора",
+        "## Полнота исходных данных",
         "",
-        "| Источник | Статус | Обязательный | Ошибка |",
-        "|---|---|---|---|",
     ]
-    for item in coverage:
-        lines.append("| {0} | {1} | {2} | {3} |".format(markdown_escape(item.get("source")), markdown_escape(item.get("status")), "yes" if item.get("required", True) else "no", markdown_escape(item.get("error") or "")))
+    coverage_rows = _coverage_display_rows(coverage)
+    lines.append(
+        "Успешно собранных источников: {0}; источников с ограничениями или ошибками: {1}. Полный технический список находится в `report.json`.".format(
+            sum(1 for item in coverage if item.get("status") == "collected"),
+            len(coverage) - sum(1 for item in coverage if item.get("status") == "collected"),
+        )
+    )
+    if coverage_rows:
+        lines.extend(["", "| Источник с ограничением | Статус | Обязательный | Ошибка |", "|---|---|---|---|"])
+        for item in coverage_rows:
+            lines.append("| {0} | {1} | {2} | {3} |".format(markdown_escape(item.get("display_source")), markdown_escape(_status_label(item.get("status"))), "да" if item.get("required", True) else "нет", markdown_escape(item.get("error") or "")))
+    else:
+        lines.extend(["", "Все заявленные источники собраны без ошибок и усечения."])
     ledger_counts = {}
     for item in ledger:
         ledger_counts[item["status"]] = ledger_counts.get(item["status"], 0) + 1
     lines.extend(
         [
             "",
-            "## Реестр выполнения правил",
+            "## Результаты автоматических проверок",
             "",
-            "matched={0}; not_matched={1}; unknown={2}; not_applicable={3}.".format(
+            "Обнаружена проблема: {0}; проблема не обнаружена: {1}; не удалось проверить: {2}; не применяется: {3}.".format(
                 ledger_counts.get("matched", 0),
                 ledger_counts.get("not_matched", 0),
                 ledger_counts.get("unknown", 0),
@@ -676,26 +851,20 @@ def build_report(collection_dir):
     )
     unknown_rules = [item for item in ledger if item["status"] == "unknown"]
     if unknown_rules:
-        lines.append("`unknown` означает, что правило нельзя оценить из-за несобранного evidence; это не finding и не результат проверки.")
+        lines.append("«Не удалось проверить» означает, что для проверки не хватает исходных данных. Это не признак исправности или неисправности.")
         lines.append("")
         cause_counts = {}
         for item in unknown_rules:
             for cause in _compact_missing_evidence(item.get("missing_evidence", [])):
                 cause_counts[cause] = cause_counts.get(cause, 0) + 1
         if cause_counts:
-            lines.append("Основные причины `unknown` (число зависимых правил):")
+            lines.append("Почему проверки не выполнены (в скобках — сколько проверок зависит от источника):")
             lines.append("")
             for cause, count in sorted(cause_counts.items(), key=lambda item: (-item[1], item[0]))[:10]:
-                lines.append("- {0} — {1}.".format(markdown_code(cause), count))
+                lines.append("- {0} — {1}.".format(markdown_escape(_human_gap(cause)), count))
             lines.append("")
-        lines.extend(["| Rule ID | Статус | Отсутствующие evidence |", "|---|---|---|"])
-        for item in unknown_rules[:100]:
-            missing = item.get("missing_evidence", [])
-            omitted = item.get("missing_evidence_total", len(missing)) - len(missing)
-            text = ", ".join(_compact_missing_evidence(missing)) + ("; omitted={0}".format(omitted) if omitted else "")
-            lines.append("| `{0}` | unknown | {1} |".format(markdown_escape(item["rule_id"]), markdown_escape(text)))
-        lines.append("")
-    lines.extend(["", "## Инвентаризация узлов", "", "| Inventory host | Hostname | ОС | Ядро | Cgroup | kubelet | IPv6 disabled |", "|---|---|---|---|---|---|---|"])
+        lines.extend(["Подробный список по каждой проверке сохранён в `report.json`.", ""])
+    lines.extend(["", "## Инвентаризация узлов", "", "| Имя в inventory | Имя узла | ОС | Ядро | cgroup | kubelet | Где отключён IPv6 |", "|---|---|---|---|---|---|---|"])
     for item in node_inventory:
         lines.append(
             "| {0} | {1} | {2} | {3} | {4} | {5} | {6} |".format(
@@ -708,79 +877,83 @@ def build_report(collection_dir):
                 markdown_escape(", ".join(item.get("ipv6_disabled") or [])),
             )
         )
-    lines.extend(["", "## Findings", ""])
+    lines.extend(["", "## Обнаруженные проблемы", ""])
     if not findings:
-        lines.append("Зарегистрированных deterministic findings нет. Это не доказывает отсутствие проблемы.")
+        lines.append("Автоматические проверки не обнаружили проблем. Это не доказывает, что кластер полностью исправен: часть источников могла быть недоступна.")
     for finding in findings:
+        affected = finding.get("affected") or []
+        affected_visible = affected[:10]
+        affected_omitted = max(0, finding.get("affected_total", len(affected)) - len(affected_visible))
+        evidence = finding.get("evidence") or []
+        evidence_visible = evidence[:10]
+        evidence_omitted = max(0, finding.get("evidence_total", len(evidence)) - len(evidence_visible))
         lines.extend(
             [
-                "### [{0}] {1}".format(markdown_escape(finding["severity"]), markdown_escape(finding["title"])),
-                "",
-                "Rule ID: `{0}`.".format(markdown_escape(finding["rule_id"])),
-                "",
-                markdown_escape(finding["summary"]),
-                "",
-                "Тип вывода: `{0}`; detection confidence: `{1}`; causal confidence: `{2}`.".format(
-                    markdown_escape(finding.get("classification")),
-                    markdown_escape(finding.get("detection_confidence")),
-                    markdown_escape(finding.get("causal_confidence")),
+                "### [{0}] {1}".format(
+                    markdown_escape(SEVERITY_LABELS.get(finding.get("severity"), str(finding.get("severity") or "СВЕДЕНИЕ").upper())),
+                    markdown_escape(finding["title"]),
                 ),
                 "",
-                "Rule pack: `{0}`; version scope: {1}.".format(
-                    markdown_escape(finding.get("rule_pack_version")), markdown_escape(finding.get("version_scope"))
+                "Что обнаружено: {0}".format(markdown_escape(finding["summary"])),
+                "",
+                "Что это означает: {0}".format(markdown_escape(finding.get("explanation") or "Описание отсутствует.")),
+                "",
+                "Надёжность вывода: {0}; уверенность в обнаружении: {1}; уверенность в установленной причине: {2}.".format(
+                    markdown_escape(CLASSIFICATION_LABELS.get(finding.get("classification"), finding.get("classification") or "не указана")),
+                    markdown_escape(_confidence_label(finding.get("detection_confidence"))),
+                    markdown_escape(_confidence_label(finding.get("causal_confidence"))),
                 ),
                 "",
-                "Время/окно: {0} — {1}; duration={2}s; correlation window={3}s.".format(
-                    markdown_escape(finding.get("started_at") or report.get("started_at") or "unknown"),
-                    markdown_escape(finding.get("ended_at") or report.get("ended_at") or "unknown"),
-                    markdown_escape(finding.get("duration_seconds") if finding.get("duration_seconds") is not None else "unknown"),
-                    markdown_escape(finding.get("window_seconds") if finding.get("window_seconds") is not None else "n/a"),
+                "Время: {0} — {1}; длительность: {2} с; окно сопоставления: {3} с.".format(
+                    markdown_escape(finding.get("started_at") or report.get("started_at") or "неизвестно"),
+                    markdown_escape(finding.get("ended_at") or report.get("ended_at") or "неизвестно"),
+                    markdown_escape(finding.get("duration_seconds") if finding.get("duration_seconds") is not None else "неизвестно"),
+                    markdown_escape(finding.get("window_seconds") if finding.get("window_seconds") is not None else "не применяется"),
                 ),
                 "",
-                "Затронуто: {0}; total={1}; omitted={2}.".format(
-                    markdown_escape(", ".join(finding["affected"][:50]) or "cluster"),
+                "Затронутые объекты: {0}; всего: {1}; не показано: {2}.".format(
+                    markdown_escape(", ".join(affected_visible) or "кластер"),
                     finding.get("affected_total", len(finding["affected"])),
-                    max(0, finding.get("affected_total", len(finding["affected"])) - min(50, len(finding["affected"]))),
+                    affected_omitted,
                 ),
                 "",
-                "Источники правил: {0}.".format(", ".join("`{0}`".format(markdown_escape(value)) for value in finding.get("source_refs", []))),
+                "Другие возможные объяснения: {0}.".format(markdown_escape("; ".join(finding.get("alternatives", [])) or "не указаны")),
                 "",
-                "Evidence: {0}; total={1}; omitted={2}.".format(
-                    ", ".join("`{0}`".format(markdown_escape(value)) for value in finding["evidence"]),
-                    finding.get("evidence_total", len(finding["evidence"])),
-                    max(0, finding.get("evidence_total", len(finding["evidence"])) - len(finding["evidence"])),
+                "Что говорит против текущей проблемы: {0}.".format(markdown_escape("; ".join(finding.get("counter_evidence", [])) or "в собранных данных ничего не найдено")),
+                "",
+                "Что не удалось проверить: {0}.".format(markdown_escape("; ".join(finding.get("missing_checks", [])) or "дополнительные пробелы не указаны")),
+                "",
+                "Что делать: {0}".format(markdown_escape(finding["recommendation"])),
+                "",
+                "Идентификатор проверки: `{0}`. Где посмотреть исходные данные: {1}; всего ссылок: {2}; не показано: {3}.".format(
+                    markdown_escape(finding["rule_id"]),
+                    ", ".join(markdown_code(value) for value in evidence_visible) or "ссылки отсутствуют",
+                    finding.get("evidence_total", len(evidence)),
+                    evidence_omitted,
                 ),
-                "",
-                "Альтернативы: {0}.".format(markdown_escape("; ".join(finding.get("alternatives", [])) or "нет явно перечисленных")),
-                "",
-                "Counter-evidence: {0}.".format(markdown_escape("; ".join(finding.get("counter_evidence", [])) or "не обнаружено в собранном evidence")),
-                "",
-                "Missing checks: {0}.".format(markdown_escape("; ".join(finding.get("missing_checks", [])) or "нет явно указанных")),
-                "",
-                "Рекомендация: {0}".format(markdown_escape(finding["recommendation"])),
                 "",
             ]
         )
         fragments = finding.get("evidence_fragments", [])
         if fragments:
-            lines.extend(["Bounded evidence excerpts:", ""])
-            for fragment in fragments[:20]:
+            lines.extend(["Фрагменты исходных сообщений:", ""])
+            for fragment in fragments[:10]:
                 lines.append(
                     "- `{0}` [{1}] {2}: {3}".format(
                         markdown_escape(fragment.get("reference")),
-                        markdown_escape(fragment.get("status")),
-                        markdown_escape(fragment.get("timestamp") or "unknown"),
+                        markdown_escape(_status_label(fragment.get("status"))),
+                        markdown_escape(fragment.get("timestamp") or "время неизвестно"),
                         markdown_escape(fragment.get("excerpt") or ""),
                     )
                 )
             lines.append("")
     stats = normalized.get("stats", {})
-    _render_message_insights(lines, normalized.get("message_insights", []))
+    _render_message_insights(lines, report_message_insights)
     lines.extend(
         [
-            "## Нормализация и корреляция",
+            "## Обработка и сопоставление журналов",
             "",
-            "Обработано записей: {0}; категоризировано: {1}; неизвестно: {2}; malformed: {3}; correlations: {4}; truncated: {5}; unknown replacements: {6}.".format(
+            "Обработано записей: {0}; распознано: {1}; не распознано: {2}; повреждено: {3}; совпадений по времени: {4}; данные усечены: {5}; заменено редких шаблонов: {6}.".format(
                 stats.get("input_records", 0),
                 stats.get("categorized_records", 0),
                 stats.get("uncategorized_records", 0),
@@ -796,9 +969,9 @@ def build_report(collection_dir):
     if unknown:
         lines.extend(
             [
-                "### Приблизительные heavy hitters неизвестных fingerprints",
+                "### Частые нераспознанные сообщения",
                 "",
-                "Это не findings, а частые ещё не классифицированные шаблоны для локального triage. Список сбалансирован по компонентам; полный набор остаётся в `normalized-events.json.gz`.",
+                "Это не обнаруженные проблемы, а частые шаблоны, смысл которых ещё не описан встроенными правилами. Полный список остаётся в `normalized-events.json.gz`.",
                 "",
             ]
         )
@@ -812,7 +985,7 @@ def build_report(collection_dir):
                         markdown_escape(occurrence.get("maximum", item.get("count"))),
                         markdown_escape(item.get("estimate_error", 0)),
                     ),
-                    "  Template: {0}".format(markdown_code(_bounded_report_text(item.get("template")))),
+                    "  Шаблон: {0}".format(markdown_code(_bounded_report_text(item.get("template")))),
                 ]
             )
         if unknown_omitted:
@@ -820,20 +993,20 @@ def build_report(collection_dir):
         lines.append("")
     correlations = normalized.get("correlations", [])
     if correlations:
-        lines.extend(["## Correlation timeline", "", "| Episode | Type | Scope | Started | Ended | Duration, s |", "|---|---|---|---|---|---:|"])
+        lines.extend(["## Совпадения признаков по времени", "", "| Эпизод | Тип | Объект | Начало | Конец | Длительность, с |", "|---|---|---|---|---|---:|"])
         for item in correlations[:100]:
             lines.append(
                 "| `{0}` | `{1}` | {2} | {3} | {4} | {5} |".format(
                     markdown_escape(item.get("episode_id") or "unknown"),
                     markdown_escape(item.get("correlation_id")),
                     markdown_escape(item.get("scope")),
-                    markdown_escape(item.get("started_at") or "unknown"),
-                    markdown_escape(item.get("ended_at") or "unknown"),
-                    markdown_escape(item.get("duration_seconds") if item.get("duration_seconds") is not None else "unknown"),
+                    markdown_escape(item.get("started_at") or "неизвестно"),
+                    markdown_escape(item.get("ended_at") or "неизвестно"),
+                    markdown_escape(item.get("duration_seconds") if item.get("duration_seconds") is not None else "неизвестно"),
                 )
             )
         if len(correlations) > 100:
-            lines.extend(["", "Timeline total={0}; omitted={1}.".format(len(correlations), len(correlations) - 100)])
+            lines.extend(["", "Всего эпизодов: {0}; не показано: {1}.".format(len(correlations), len(correlations) - 100)])
         lines.append("")
     atomic_write_bytes(root / "report.md", ("\n".join(lines).rstrip() + "\n").encode("utf-8"))
     return report

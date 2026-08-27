@@ -1,6 +1,6 @@
 # Автономный rule pack kdiag
 
-Rule pack `2026.08.10` содержит 98 проверок и работает без сети, LLM и внешней базы знаний. После сборки все классификаторы, карточки правил, ссылки на первичные источники и synthetic self-test входят в `kdiag.pyz`.
+Rule pack `2026.08.11` содержит 98 проверок и работает без сети, LLM и внешней базы знаний. После сборки все классификаторы, карточки правил, ссылки на первичные источники и synthetic self-test входят в `kdiag.pyz`.
 
 ## Модель достоверности
 
@@ -110,7 +110,7 @@ python3.8 kdiag.pyz rules explain cgroup.service_failure
 - Public issue trackers и форумы не используются как доказательство причины.
 - Локальные патчи РЕД ОС, точный KESL build и версия Cilium могут менять тексты сообщений.
 - Unknown fingerprints остаются внутри incident bundle и предназначены для локального анализа администратора.
-- Известные message fingerprints обогащаются полностью офлайн: category (`routine`, `observe`, `actionable`, `security`), объяснение, диапазон числа появлений Space-Saving, first/last/rate, Node/Pod scope, Pod readiness/restarts, Events, readyz, EndpointSlice, связанные journal categories, counter-evidence, missing checks и условие решения. Это triage metadata, а не дополнительный finding; сеть и LLM не используются.
+- Известные шаблоны сообщений обогащаются полностью автономно: категория, объяснение, диапазон числа появлений, первое/последнее время, частота, затронутые узлы/Pod, готовность и перезапуски Pod, события Kubernetes, readyz, EndpointSlice, связанные ошибки журналов, противоречащие данные, недоступные проверки и условие решения. В основной Markdown-отчёт попадают только требующие внимания карточки без отдельной проверки; штатные сообщения остаются в `normalized-events.json.gz`.
 - Rule sources объясняют семантику проверки, но не являются доказательством, что конкретный vendor component вызвал конкретный инцидент.
 - Проверки Service/DNS являются пассивными: программа не создаёт test Pod и не выполняет `pods/exec`.
 - Полный etcd check поддерживает stacked kubeadm layout со стандартными healthcheck certificate paths; external/custom etcd требует отдельной конфигурации в будущей версии.

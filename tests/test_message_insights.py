@@ -20,6 +20,12 @@ class MessageInsightsTest(unittest.TestCase):
         )
         self.assertEqual("routine", reload_noop["category"])
 
+        compatibility = match_message_insight(
+            "systemd-sysv-generator",
+            "SysV service lacks a native systemd unit file, automatically generating a unit file",
+        )
+        self.assertEqual("observe", compatibility["category"])
+
     def test_security_catalog_also_enriches_a_categorized_event(self):
         message = 'ptrace attack of "/opt/target" was attempted by "/opt/kaspersky/kesl"'
         normalized = normalize_evidence(

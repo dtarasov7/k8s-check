@@ -86,6 +86,9 @@ ETCD_MANIFEST = "/etc/kubernetes/manifests/etcd.yaml"
 ETCD_CA = "/etc/kubernetes/pki/etcd/ca.crt"
 ETCD_CERT = "/etc/kubernetes/pki/etcd/healthcheck-client.crt"
 ETCD_KEY = "/etc/kubernetes/pki/etcd/healthcheck-client.key"
+AUTHENTICATION_CONFIG_PATHS = (
+    "/etc/kubernetes/deckhouse/extra-files/authentication-config.yaml",
+)
 
 
 def _read_text(path, max_bytes=1024 * 1024):
@@ -117,6 +120,35 @@ def _os_release():
 def _boot_id():
     result = _read_text("/proc/sys/kernel/random/boot_id", 256)
     return result.get("text", "").strip() or None
+
+
+def _authentication_config_files(paths=AUTHENTICATION_CONFIG_PATHS):
+    result = []
+    for path in paths:
+        item = {"path": str(path), "status": "absent"}
+        try:
+            file_stat = os.stat(path)
+        except FileNotFoundError:
+            result.append(item)
+            continue
+        except OSError as error:
+            item.update({"status": "unavailable", "error": str(error)[:1024]})
+            result.append(item)
+            continue
+        item.update(
+            {
+                "status": "present",
+                "regular_file": stat.S_ISREG(file_stat.st_mode),
+                "readable": os.access(path, os.R_OK),
+                "size_bytes": file_stat.st_size,
+                "mode": "{0:04o}".format(stat.S_IMODE(file_stat.st_mode)),
+                "uid": file_stat.st_uid,
+                "gid": file_stat.st_gid,
+                "mtime_ns": file_stat.st_mtime_ns,
+            }
+        )
+        result.append(item)
+    return result
 
 
 def _ipv6_disable_values():
@@ -223,7 +255,7 @@ def _command_specs(since_hours):
         ("journal_boots", ["journalctl", "--list-boots", "--no-pager"], "internal"),
         (
             "journal_services_current",
-            ["journalctl", "--no-pager", "--utc", "-o", "json", "--since", since] + journal_units,
+            ["journalctl", "--no-pager", "--utc", "--reverse", "-o", "json", "--since", since] + journal_units,
             "confidential",
         ),
         (
@@ -231,7 +263,7 @@ def _command_specs(since_hours):
             ["journalctl", "--no-pager", "--utc", "-o", "json", "-b", "-1", "-n", "2000"] + journal_units,
             "confidential",
         ),
-        ("journal_kernel_current", ["journalctl", "--no-pager", "--utc", "-o", "json", "-k", "--since", since], "confidential"),
+        ("journal_kernel_current", ["journalctl", "--no-pager", "--utc", "--reverse", "-o", "json", "-k", "--since", since], "confidential"),
         ("journal_kernel_previous", ["journalctl", "--no-pager", "--utc", "-o", "json", "-k", "-b", "-1", "-n", "2000"], "confidential"),
     ]
 
@@ -715,6 +747,7 @@ def collect_node_snapshot(since_hours, timeout_seconds, max_command_bytes, syste
             "sysctl_assignments": _sysctl_assignments(),
             "certificates": _certificate_metadata(timeout_seconds, max_command_bytes),
             "kubelet_certificate_rotation": _kubelet_certificate_rotation(),
+            "authentication_config_files": _authentication_config_files(),
             "etcd": etcd,
         },
         "commands": commands,

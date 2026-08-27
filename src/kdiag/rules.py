@@ -43,6 +43,23 @@ COREDNS_LOG_QUERY_RE = re.compile(
 )
 COREDNS_QUERY_NAME_RE = re.compile(r"(?:\\[0-9]{3}|[A-Z0-9_*?-])(?:\\[0-9]{3}|[A-Z0-9_.*?-]){0,252}\.?", re.I)
 MAX_COREDNS_QUERY_DETAILS = 20
+AUTH_CONFIG_PATH_RE = re.compile(r'(/[A-Za-z0-9_./-]*authentication-config\.ya?ml)', re.I)
+
+GAP_SOURCE_LABELS = {
+    "journal_services_current": "служебный журнал текущей загрузки",
+    "journal_kernel_current": "журнал ядра текущей загрузки",
+    "pod_logs": "локальные журналы контейнеров",
+    "logs": "журналы системных Pod",
+}
+GAP_STATUS_LABELS = {
+    "truncated": "усечён лимитом размера",
+    "timeout": "не собран за отведённое время",
+    "failed": "завершился ошибкой",
+    "unsupported": "недоступен на узле",
+    "permission_denied": "нет прав на чтение",
+    "missing": "не собран",
+    "source_unavailable": "источник недоступен",
+}
 
 
 def _finding(
@@ -87,6 +104,7 @@ def _finding(
         "counter_evidence": (counter_evidence or [])[:20],
         "missing_checks": (missing_checks or [])[:20],
         "recommendation": recommendation,
+        "explanation": metadata["description"],
     }
 
 
@@ -117,6 +135,96 @@ def _events(normalized, category, sources=None):
             continue
         result.append(event)
     return result
+
+
+def _collection_gap_summary(values):
+    grouped = {}
+    for value in values:
+        source, status = str(value).rsplit(":", 1) if ":" in str(value) else (str(value), "missing")
+        source_id = source.rsplit("/", 1)[-1]
+        key = (source_id, status)
+        grouped[key] = grouped.get(key, 0) + 1
+    details = []
+    for (source_id, status), count in sorted(grouped.items(), key=lambda item: (-item[1], item[0])):
+        source_label = GAP_SOURCE_LABELS.get(source_id, "источник {0}".format(source_id))
+        status_label = GAP_STATUS_LABELS.get(status, status)
+        details.append("{0}: {1} ({2})".format(source_label, status_label, count))
+    return "; ".join(details)
+
+
+def _authentication_config_context(node_snapshots, kubernetes, events):
+    paths = set()
+    for event in events:
+        paths.update(AUTH_CONFIG_PATH_RE.findall(str(event.get("message_excerpt") or "")))
+    counter_evidence = []
+    missing_checks = [
+        "Видимость файла внутри mount namespace контейнера kube-apiserver напрямую не проверяется."
+    ]
+    present = []
+    metadata_collected = False
+    for node_name, snapshot in (node_snapshots or {}).items():
+        file_items = snapshot.get("facts", {}).get("authentication_config_files")
+        if file_items is None:
+            continue
+        metadata_collected = True
+        for item in file_items or []:
+            if paths and item.get("path") not in paths:
+                continue
+            if item.get("status") == "present":
+                present.append((node_name, item))
+    if present:
+        for node_name, item in present[:20]:
+            counter_evidence.append(
+                "На узле {0} файл {1} существует сейчас; regular_file={2}, readable={3}.".format(
+                    node_name,
+                    item.get("path"),
+                    item.get("regular_file"),
+                    item.get("readable"),
+                )
+            )
+    elif not metadata_collected:
+        missing_checks.append("Текущее наличие authentication config на узлах не собиралось этой версией снимка.")
+
+    readyz_source = (kubernetes or {}).get("sources", {}).get("api_readyz", {}) or {}
+    readyz_healthy = False
+    if readyz_source.get("status") == "collected":
+        checks = (readyz_source.get("data") or {}).get("checks") or []
+        if checks and not any(item.get("status") == "failed" for item in checks):
+            readyz_healthy = True
+            counter_evidence.append("Текущая проверка готовности API server (readyz) успешна.")
+        elif not checks:
+            missing_checks.append("Ответ readyz собран, но отдельные проверки из него не распознаны.")
+    else:
+        missing_checks.append("Текущее состояние API server через readyz не собрано.")
+
+    pods_source = (kubernetes or {}).get("sources", {}).get("pods", {}) or {}
+    apiserver_pods = []
+    if pods_source.get("status") == "collected":
+        for pod in (pods_source.get("data") or {}).get("items", []) or []:
+            metadata = pod.get("metadata", {}) or {}
+            containers = pod.get("spec", {}).get("containers", []) or []
+            if "kube-apiserver" not in str(metadata.get("name") or "") and not any(
+                item.get("name") == "kube-apiserver" for item in containers
+            ):
+                continue
+            statuses = [
+                item for item in (pod.get("status", {}).get("containerStatuses") or [])
+                if item.get("name") == "kube-apiserver"
+            ]
+            healthy = pod.get("status", {}).get("phase") == "Running" and bool(statuses) and all(
+                item.get("ready") is True for item in statuses
+            )
+            apiserver_pods.append((metadata.get("namespace"), metadata.get("name"), healthy))
+        if apiserver_pods and all(item[2] for item in apiserver_pods):
+            counter_evidence.append("Все собранные Pod kube-apiserver сейчас Running/Ready.")
+    else:
+        missing_checks.append("Текущее состояние Pod kube-apiserver не собрано.")
+    pods_healthy = bool(apiserver_pods) and all(item[2] for item in apiserver_pods)
+    return {
+        "counter_evidence": counter_evidence,
+        "missing_checks": missing_checks,
+        "current_healthy": bool(present) and readyz_healthy and pods_healthy,
+    }
 
 
 def _event_target(event):
@@ -1453,15 +1561,24 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
         evidence_gaps.append("kubernetes/logs:{0}".format(logs_status))
         evidence_gap_refs.append("kubernetes.json.gz#logs")
     if evidence_gaps:
+        has_truncated_journal = any(
+            value.endswith(":truncated") and "/journal_" in value for value in evidence_gaps
+        )
+        gap_recommendation = (
+            "Для усечённых журналов повторить сбор с большим `collection.max_command_bytes` либо меньшим "
+            "`collection.since_hours`. До повторного сбора проверки, которым нужны эти журналы, считать неполными."
+            if has_truncated_journal
+            else "Устранить указанную ошибку доступа/совместимости и повторить сбор; зависимые проверки пока считать неполными."
+        )
         findings.append(
             _finding(
                 "collector.evidence_gap",
                 "warning",
-                "Часть обязательных evidence недоступна",
-                "; ".join(sorted(evidence_gaps)),
+                "Часть обязательных данных собрана не полностью",
+                _collection_gap_summary(evidence_gaps),
                 sorted(set(value.split("/", 1)[0] for value in evidence_gaps)),
                 evidence_gap_refs,
-                "Исправить доступ или совместимость источника и повторить snapshot; выводы зависимых правил считать неполными.",
+                gap_recommendation,
                 causal_confidence="none",
                 classification="fact",
             )
@@ -2127,19 +2244,33 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
 
     auth_config_events = _events(normalized, "authentication_config_read_error")
     if auth_config_events:
-        findings.append(
-            _event_finding(
-                "controlplane.authentication_config_read_error",
-                "warning",
-                "kube-apiserver не может прочитать authentication config",
-                "В журналах kube-apiserver обнаружено ошибок чтения authentication config: {0}; это факт ошибки чтения, но не доказательство недоступности API.".format(len(auth_config_events)),
-                auth_config_events,
-                "Проверить фактический флаг authentication-config, mount/path и Deckhouse reconciliation вокруг первого/последнего события; не создавать пустой файл для подавления сообщения.",
-                confidence="none",
-                alternatives=["краткое окно атомарной замены файла", "устаревший flag или отсутствующий mount"],
-                classification="fact",
-            )
+        context = _authentication_config_context(node_snapshots, kubernetes, auth_config_events)
+        recommendation = (
+            "Текущее отсутствие файла не подтверждено. Если после последней записи ошибка не повторяется, readyz и Pod остаются исправны, действие не требуется. "
+            "При новых ошибках проверить mount файла внутри kube-apiserver и события Deckhouse reconciliation."
+            if context["current_healthy"]
+            else "Проверить фактический флаг authentication-config, наличие и mount файла внутри kube-apiserver, затем Deckhouse reconciliation вокруг первой/последней записи; не создавать пустой файл."
         )
+        finding = _event_finding(
+            "controlplane.authentication_config_read_error",
+            "info" if context["current_healthy"] else "warning",
+            "В журнале kube-apiserver была ошибка чтения authentication config",
+            "Обнаружено записей: {0}. Они доказывают ошибку чтения в момент записи, но не доказывают, что файл отсутствует сейчас или API server недоступен.".format(
+                sum(int(event.get("occurrence_count") or 1) for event in auth_config_events)
+            ),
+            auth_config_events,
+            recommendation,
+            confidence="none",
+            alternatives=[
+                "краткое окно атомарной замены файла",
+                "файл существует на host, но временно не виден в mount namespace контейнера",
+                "устаревший flag или mount после reconciliation",
+            ],
+            classification="fact",
+        )
+        finding["counter_evidence"] = context["counter_evidence"][:20]
+        finding["missing_checks"] = context["missing_checks"][:20]
+        findings.append(finding)
 
     ptrace_events = _events(normalized, "ptrace_security_alert", {"journal"})
     if ptrace_events:
