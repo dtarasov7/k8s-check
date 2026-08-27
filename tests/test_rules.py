@@ -263,6 +263,8 @@ class RulesTest(unittest.TestCase):
                                 "2026-01-01T00:00:02Z [ERROR] plugin/errors: 2 misspelled.svc.cluster.local. A: read udp: i/o timeout",
                                 '2026-01-01T00:00:03Z [INFO] client - 42 "AAAA IN wrong-name.example. udp 50 false 1232" SERVFAIL',
                                 "2026-01-01T00:00:04Z plugin/loop: Loop detected for zone .",
+                                "2026-01-01T00:00:05Z [ERROR] plugin/errors: 2 smoke-mini-a.d8-system.svc.cluster.local. A: read udp: i/o timeout",
+                                '2026-01-01T00:00:06Z [INFO] client - 42 "AAAA IN real-service.demo.svc.cluster.local. udp 50 false 1232" SERVFAIL',
                             )
                         ),
                     }
@@ -270,11 +272,14 @@ class RulesTest(unittest.TestCase):
             },
         }
         normalized = normalize_evidence({"collection_id": "dns"}, {}, kubernetes)
+        self.assertEqual(1, normalized["stats"]["dns_smoke_events_suppressed"])
         findings = evaluate_rules({"nodes": []}, {}, kubernetes, normalized)
         finding = next(item for item in findings if item["rule_id"] == "dns.coredns_errors")
         self.assertIn("misspelled.svc.cluster.local [A] ×2", finding["summary"])
         self.assertIn("wrong-name.example [AAAA] ×1", finding["summary"])
-        self.assertIn("из 3/4 событий", finding["summary"])
+        self.assertIn("из 4/5 событий", finding["summary"])
+        self.assertNotIn("smoke-mini-", json.dumps(finding))
+        self.assertEqual(5, finding["event_count"])
         self.assertTrue(any("line-1" in value for value in finding["evidence"]))
 
     def test_disabled_cgroup_checks_produce_no_cgroup_findings(self):

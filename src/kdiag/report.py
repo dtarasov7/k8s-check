@@ -1,6 +1,8 @@
 import os
+import re
 from pathlib import Path
 
+from kdiag.message_insights import enrich_message_insights
 from kdiag.normalize import normalize_evidence
 from kdiag.rule_catalog import RULE_CATALOG, RULE_PACK_VERSION
 from kdiag.rules import evaluate_rules
@@ -29,7 +31,10 @@ def load_collection(collection_dir):
         nodes[item["host"]] = load_gzip_json(_safe_member(root, item["file"]))
     kubernetes = {}
     kubernetes_item = collection.get("kubernetes", {})
-    if kubernetes_item.get("status") in ("collected", "partial") and kubernetes_item.get("file"):
+    # Even an unreachable snapshot contains the per-source kubectl failures
+    # needed to explain coverage. The collector writes that bundle before it
+    # derives the aggregate status.
+    if kubernetes_item.get("file"):
         kubernetes = load_gzip_json(_safe_member(root, kubernetes_item["file"]))
     prometheus = {}
     prometheus_item = collection.get("prometheus", {})
@@ -92,7 +97,15 @@ def _coverage(collection, nodes, kubernetes):
                 "entry_count": len(pod_logs.get("entries", []) or []),
             }
         )
-    coverage.append({"source": "kubernetes", "status": collection.get("kubernetes", {}).get("status"), "error": collection.get("kubernetes", {}).get("error"), "required": True})
+    kubernetes_status = collection.get("kubernetes", {}).get("status")
+    coverage.append(
+        {
+            "source": "kubernetes",
+            "status": kubernetes_status,
+            "error": collection.get("kubernetes", {}).get("error"),
+            "required": kubernetes_status != "disabled",
+        }
+    )
     for source_id, source in sorted(kubernetes.get("sources", {}).items()):
         coverage.append(
             {
@@ -328,8 +341,16 @@ def _requirement_gaps(coverage, requirement):
     else:
         matches = [item for item in coverage if item.get("source") == requirement]
     if not matches:
+        if requirement.startswith("kubernetes/"):
+            parent = next((item for item in coverage if item.get("source") == "kubernetes"), None)
+            if parent and parent.get("status") not in (None, "collected", "partial"):
+                return ["kubernetes:{0}".format(parent.get("status"))]
         return ["{0}:missing".format(requirement)]
-    return [item["source"] for item in matches if item.get("status") != "collected"]
+    return [
+        "{0}:{1}".format(item["source"], item.get("status") or "missing")
+        for item in matches
+        if item.get("status") != "collected"
+    ]
 
 
 def _rule_ledger(findings, coverage, options):
@@ -340,9 +361,11 @@ def _rule_ledger(findings, coverage, options):
     collect_etcd = options.get("collect_etcd", False)
     matched = {item.get("rule_id") for item in findings}
     prometheus_status = next((item.get("status") for item in coverage if item.get("source") == "prometheus"), None)
+    kubernetes_status = next((item.get("status") for item in coverage if item.get("source") == "kubernetes"), None)
     ledger = []
     for rule_id in sorted(RULE_CATALOG):
         missing = []
+        status = None
         if rule_id in matched:
             status = "matched"
         elif rule_id.startswith("cgroup.") or rule_id == "security_agent.cgroup_denial":
@@ -363,10 +386,15 @@ def _rule_ledger(findings, coverage, options):
         elif rule_id.startswith("collector."):
             status = "not_matched"
         else:
-            for requirement in RULE_COVERAGE_REQUIREMENTS.get(rule_id, ()):
+            requirements = RULE_COVERAGE_REQUIREMENTS.get(rule_id, ())
+            if kubernetes_status == "disabled" and any(value.startswith("kubernetes/") for value in requirements):
+                status = "not_applicable"
+                requirements = ()
+            for requirement in requirements:
                 missing.extend(_requirement_gaps(coverage, requirement))
             missing = sorted(set(missing))
-            status = "unknown" if missing else "not_matched"
+            if status is None:
+                status = "unknown" if missing else "not_matched"
         ledger.append(
             {
                 "rule_id": rule_id,
@@ -391,14 +419,159 @@ def _select_unknown_fingerprints(values, limit=20, per_component=5):
     return selected, max(0, len(values) - len(selected))
 
 
+def _render_message_insights(lines, values, limit=30):
+    insights = list(values or [])
+    if not insights:
+        return
+    lines.extend(
+        [
+            "## Офлайн-разбор сообщений",
+            "",
+            "Это локальные triage-карточки из встроенного каталога, а не автоматически созданные findings. "
+            "Для них не используются LLM, Интернет или внешние API.",
+            "",
+        ]
+    )
+    for insight in insights[:limit]:
+        occurrence = insight.get("occurrence_range") or {}
+        minimum = int(occurrence.get("minimum") or 0)
+        maximum = int(occurrence.get("maximum") or 0)
+        if insight.get("count_is_exact") or minimum == maximum:
+            occurrence_text = "точно {0}".format(maximum)
+        else:
+            occurrence_text = (
+                "гарантированно не менее {0}, оценочная верхняя граница {1}; "
+                "алгоритмическая погрешность оценки не более {2}"
+            ).format(minimum, maximum, int(insight.get("estimate_error") or 0))
+        rate = insight.get("rate_per_hour_range")
+        if rate and rate.get("minimum") is not None and rate.get("maximum") is not None:
+            if rate.get("minimum") == rate.get("maximum"):
+                rate_text = "{0}/ч".format(rate["maximum"])
+            else:
+                rate_text = "{0}..{1}/ч".format(rate["minimum"], rate["maximum"])
+        else:
+            rate_text = "недостаточно точных timestamp"
+        nodes = insight.get("affected_nodes") or []
+        pods = insight.get("affected_pods") or []
+        scope_suffix = "; список ограничен" if insight.get("scope_truncated") else ""
+        lines.extend(
+            [
+                "### [{0}] {1}".format(
+                    markdown_escape(insight.get("category") or "observe"),
+                    markdown_escape(insight.get("title") or insight.get("insight_id") or "message"),
+                ),
+                "",
+                "Состояние решения: **{0}**. Компонент: {1}.".format(
+                    markdown_escape(insight.get("decision_state") or "monitor"),
+                    markdown_code(insight.get("component") or "unknown"),
+                ),
+                "",
+                "Шаблон: {0}".format(markdown_code(_bounded_report_text(insight.get("template")))),
+                "",
+                "Частота: {0}; first seen: {1}; last seen: {2}; наблюдаемое окно: {3} с; rate: {4}; inferred timestamps: {5}.".format(
+                    occurrence_text,
+                    markdown_escape(insight.get("first_seen") or "unknown"),
+                    markdown_escape(insight.get("last_seen") or "unknown"),
+                    markdown_escape(
+                        insight.get("observed_span_seconds")
+                        if insight.get("observed_span_seconds") is not None
+                        else "unknown"
+                    ),
+                    markdown_escape(rate_text),
+                    markdown_escape(insight.get("inferred_time_samples", 0)),
+                ),
+                "",
+                "Затронутые Node: {0} ({1}); Pod: {2} ({3}){4}.".format(
+                    markdown_escape(", ".join(nodes) or "не определены"),
+                    insight.get("affected_nodes_count", len(nodes)),
+                    markdown_escape(", ".join(pods) or "не определены"),
+                    insight.get("affected_pods_count", len(pods)),
+                    scope_suffix,
+                ),
+                "",
+                "Что означает: {0}".format(markdown_escape(insight.get("explanation") or "нет описания")),
+                "",
+            ]
+        )
+        checks = insight.get("checks") or []
+        if checks:
+            lines.extend(["Локальные проверки:", ""])
+            for check in checks[:20]:
+                evidence = check.get("evidence") or []
+                evidence_text = "; evidence: {0}".format(
+                    ", ".join(markdown_code(value) for value in evidence)
+                ) if evidence else ""
+                lines.append(
+                    "- [{0}] {1}: {2}{3}".format(
+                        markdown_escape(check.get("status") or "observe"),
+                        markdown_code(check.get("name") or "check"),
+                        markdown_escape(check.get("summary") or ""),
+                        evidence_text,
+                    )
+                )
+            lines.append("")
+        lines.extend(
+            [
+                "Контр-доказательства: {0}.".format(
+                    markdown_escape("; ".join(insight.get("counter_evidence") or []) or "не обнаружены в доступном snapshot")
+                ),
+                "",
+                "Недостающие проверки: {0}.".format(
+                    markdown_escape("; ".join(insight.get("missing_checks") or []) or "нет явно указанных")
+                ),
+                "",
+                "Условие решения: {0}".format(markdown_escape(insight.get("decision_condition") or "нет")),
+                "",
+                "Рекомендация: {0}".format(markdown_escape(insight.get("recommendation") or "нет")),
+                "",
+            ]
+        )
+        sources = insight.get("sources") or []
+        if sources:
+            lines.extend(
+                [
+                    "Справочные источники (сохранённые URL, при анализе сеть не используется): {0}.".format(
+                        ", ".join("[источник {0}]({1})".format(index + 1, value) for index, value in enumerate(sources))
+                    ),
+                    "",
+                ]
+            )
+    if len(insights) > limit:
+        lines.extend(["В Markdown опущено карточек: {0}; полный набор находится в `normalized-events.json.gz`.".format(len(insights) - limit), ""])
+
+
 def _bounded_report_text(value, limit=220):
     text = " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+NODE_GAP_RE = re.compile(r"^node/[^/]+/(command/[^:]+|pod_logs):([^:]+)$")
+
+
+def _compact_missing_evidence(values):
+    grouped = {}
+    other = []
+    for value in values:
+        match = NODE_GAP_RE.match(str(value))
+        if not match:
+            other.append(str(value))
+            continue
+        key = (match.group(1), match.group(2))
+        grouped[key] = grouped.get(key, 0) + 1
+    compact = sorted(set(other))
+    compact.extend(
+        "node/*/{0}:{1} ({2} {3})".format(path, status, count, "node" if count == 1 else "nodes")
+        for (path, status), count in sorted(grouped.items())
+    )
+    return compact
+
+
 def build_report(collection_dir):
     collection, nodes, kubernetes, prometheus = load_collection(collection_dir)
     normalized = normalize_evidence(collection, nodes, kubernetes)
+    normalized["message_insights"] = enrich_message_insights(
+        normalized.get("message_insights", []), nodes, kubernetes, normalized
+    )
     findings = evaluate_rules(collection, nodes, kubernetes, normalized, prometheus)
     node_inventory = [_node_row(name, snapshot) for name, snapshot in sorted(nodes.items())]
     coverage = _coverage(collection, nodes, kubernetes)
@@ -432,6 +605,7 @@ def build_report(collection_dir):
         "normalization": {
             "stats": normalized.get("stats", {}),
             "correlation_count": len(normalized.get("correlations", [])),
+            "message_insight_count": len(normalized.get("message_insights", [])),
             "unknown_fingerprint_count": len(normalized.get("unknown_fingerprints", [])),
         },
         "coverage": coverage,
@@ -454,6 +628,7 @@ def build_report(collection_dir):
         "coverage": coverage,
         "node_inventory": node_inventory,
         "findings": findings,
+        "message_insights": normalized.get("message_insights", []),
         "rule_evaluation_ledger": ledger,
         "prometheus_status": prometheus.get("status") if prometheus else collection.get("prometheus", {}).get("status"),
         "normalization": facts["normalization"],
@@ -501,13 +676,23 @@ def build_report(collection_dir):
     )
     unknown_rules = [item for item in ledger if item["status"] == "unknown"]
     if unknown_rules:
-        lines.append("Отсутствие finding по правилам со статусом `unknown` не означает отсутствие проблемы.")
+        lines.append("`unknown` означает, что правило нельзя оценить из-за несобранного evidence; это не finding и не результат проверки.")
         lines.append("")
+        cause_counts = {}
+        for item in unknown_rules:
+            for cause in _compact_missing_evidence(item.get("missing_evidence", [])):
+                cause_counts[cause] = cause_counts.get(cause, 0) + 1
+        if cause_counts:
+            lines.append("Основные причины `unknown` (число зависимых правил):")
+            lines.append("")
+            for cause, count in sorted(cause_counts.items(), key=lambda item: (-item[1], item[0]))[:10]:
+                lines.append("- {0} — {1}.".format(markdown_code(cause), count))
+            lines.append("")
         lines.extend(["| Rule ID | Статус | Отсутствующие evidence |", "|---|---|---|"])
         for item in unknown_rules[:100]:
             missing = item.get("missing_evidence", [])
             omitted = item.get("missing_evidence_total", len(missing)) - len(missing)
-            text = ", ".join(missing) + ("; omitted={0}".format(omitted) if omitted else "")
+            text = ", ".join(_compact_missing_evidence(missing)) + ("; omitted={0}".format(omitted) if omitted else "")
             lines.append("| `{0}` | unknown | {1} |".format(markdown_escape(item["rule_id"]), markdown_escape(text)))
         lines.append("")
     lines.extend(["", "## Инвентаризация узлов", "", "| Inventory host | Hostname | ОС | Ядро | Cgroup | kubelet | IPv6 disabled |", "|---|---|---|---|---|---|---|"])
@@ -590,6 +775,7 @@ def build_report(collection_dir):
                 )
             lines.append("")
     stats = normalized.get("stats", {})
+    _render_message_insights(lines, normalized.get("message_insights", []))
     lines.extend(
         [
             "## Нормализация и корреляция",
@@ -617,11 +803,13 @@ def build_report(collection_dir):
             ]
         )
         for item in unknown:
+            occurrence = item.get("occurrence_range") or {}
             lines.extend(
                 [
-                    "- {0} — estimated count: {1}; max error: {2}.".format(
+                    "- {0} — гарантированно не менее {1}, оценочная верхняя граница {2}; погрешность оценки не более {3}.".format(
                         markdown_code(item.get("component") or "unknown"),
-                        markdown_escape(item.get("count")),
+                        markdown_escape(occurrence.get("minimum", item.get("count"))),
+                        markdown_escape(occurrence.get("maximum", item.get("count"))),
                         markdown_escape(item.get("estimate_error", 0)),
                     ),
                     "  Template: {0}".format(markdown_code(_bounded_report_text(item.get("template")))),

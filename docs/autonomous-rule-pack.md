@@ -1,6 +1,6 @@
 # Автономный rule pack kdiag
 
-Rule pack `2026.08.8` содержит 98 проверок и работает без сети, LLM и внешней базы знаний. После сборки все классификаторы, карточки правил, ссылки на первичные источники и synthetic self-test входят в `kdiag.pyz`.
+Rule pack `2026.08.10` содержит 98 проверок и работает без сети, LLM и внешней базы знаний. После сборки все классификаторы, карточки правил, ссылки на первичные источники и synthetic self-test входят в `kdiag.pyz`.
 
 ## Модель достоверности
 
@@ -14,6 +14,7 @@ Rule pack `2026.08.8` содержит 98 проверок и работает �
 
 1. JSON-строки journald, node CRI logs, Kubernetes Events, Node conditions, Pod/container states и разрешённые Pod logs приводятся к единому event envelope.
 2. Текст классифицируется по устойчивым семантическим признакам: component/reason, errno, cgroup path, Kubernetes reason и network error class. Точные динамические значения не входят в fingerprint.
+   Штатные CoreDNS smoke queries `smoke-mini-*` исключаются из derived events/findings, но не из raw evidence.
 3. Категоризированные записи дедуплицируются и round-robin ограничиваются по source/scope/category; счётчики dropped/truncated сохраняются по источникам.
 4. Корреляции используют только реальные, не inferred timestamps. Probe episodes ограничены одним Pod, node/runtime/CNI/storage — одним Node. Для независимых episodes сохраняются start/end/duration/ID.
 5. Rule evaluator формирует findings с `classification`, detection/causal confidence, bounded evidence excerpts, alternatives, counter-evidence, missing checks и безопасной рекомендацией.
@@ -109,6 +110,7 @@ python3.8 kdiag.pyz rules explain cgroup.service_failure
 - Public issue trackers и форумы не используются как доказательство причины.
 - Локальные патчи РЕД ОС, точный KESL build и версия Cilium могут менять тексты сообщений.
 - Unknown fingerprints остаются внутри incident bundle и предназначены для локального анализа администратора.
+- Известные message fingerprints обогащаются полностью офлайн: category (`routine`, `observe`, `actionable`, `security`), объяснение, диапазон числа появлений Space-Saving, first/last/rate, Node/Pod scope, Pod readiness/restarts, Events, readyz, EndpointSlice, связанные journal categories, counter-evidence, missing checks и условие решения. Это triage metadata, а не дополнительный finding; сеть и LLM не используются.
 - Rule sources объясняют семантику проверки, но не являются доказательством, что конкретный vendor component вызвал конкретный инцидент.
 - Проверки Service/DNS являются пассивными: программа не создаёт test Pod и не выполняет `pods/exec`.
 - Полный etcd check поддерживает stacked kubeadm layout со стандартными healthcheck certificate paths; external/custom etcd требует отдельной конфигурации в будущей версии.

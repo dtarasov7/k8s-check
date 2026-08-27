@@ -2,17 +2,18 @@
 
 ## Goal
 
-Validate `kdiag 0.7.1` on the target Deckhouse cluster after the PATH, command-status, ledger, and Node-identity fixes.
+Validate `kdiag 0.8.0` offline message-insight cards and corrected Deckhouse DNS smoke filtering on the target cluster.
 
 ## Changed files
 
-- `src/kdiag/runner.py`, `src/kdiag/node.py`, `src/kdiag/orchestrator.py` -> Deckhouse safe PATH, clear unavailable-command errors, and persisted etcd collection mode.
-- `src/kdiag/node_identity.py`, `src/kdiag/normalize.py`, `src/kdiag/rules.py` -> unambiguous inventory hostname/FQDN to Kubernetes Node matching, plus cautious findings for kube-apiserver authentication-config read failures and kernel/security-agent ptrace alerts.
-- `src/kdiag/report.py`, `src/kdiag/util.py` -> per-rule evidence dependencies for `unknown` and compact component-balanced unknown fingerprints with readable angle-bracket placeholders.
-- `src/kdiag/__init__.py`, `src/kdiag/rule_catalog.py` -> application `0.7.1`, rule pack `2026.08.8`, 98 rules.
-- `tests/test_{runner,report,normalize,rules,node_smoke}.py` -> regression coverage for the fixes.
+- `src/kdiag/message_insights.py` -> embedded offline catalogue and local Pod/Event/readyz/EndpointSlice/journal correlations for routine, observe, actionable, and security messages.
+- `src/kdiag/normalize.py` -> bounded occurrence/time/Node/Pod context for known messages and suppression of the actual `smoke-mini-*` Deckhouse probe only.
+- `src/kdiag/report.py` -> message-insight JSON/Markdown output with decision conditions, counter-evidence, missing checks, and explicit frequency-estimate ranges.
+- `src/kdiag/kubernetes.py` -> allowlisted `imagePullSecrets` names for local pull-failure triage; Secret objects/content remain excluded.
+- `src/kdiag/__init__.py`, `src/kdiag/rule_catalog.py` -> application `0.8.0`, rule pack `2026.08.10`, 98 rules.
+- `tests/test_{message_insights,report,kubernetes,rules}.py` -> regression coverage for catalogue, enrichment, rendering, projection, and DNS suppression.
 - `README*.md`, `docs/UserGuide*.md`, `docs/autonomous-rule-pack.md`, implementation plan, and `CHANGELOG*.md` -> release documentation.
-- `dist/kdiag.pyz` -> rebuilt artifact; SHA-256 `883e9bd2a7a911338fd4fc481b64f33e58788b45d12efb32795cc65f7abf8bdd`.
+- `dist/kdiag.pyz` -> rebuilt artifact; SHA-256 `78c5abf51e22001b497eb7475531b41ad6d86156e83d9f1b1ea649a059559bff`.
 
 ## Current failure
 
@@ -20,15 +21,15 @@ None. A target-cluster canary has not been rerun.
 
 ## Current hypothesis
 
-Deckhouse runtime tools in `/opt/deckhouse/bin` will now be collected; remaining `unsupported` entries should indicate genuinely absent userspace clients. Ledger `unknown` entries should be limited to rules whose declared evidence is missing.
+Known screenshot templates should now appear as bounded offline triage cards rather than opaque unknown heavy hitters. `smoke-mini-*` errors should remain only in raw confidential logs. Missing Kubernetes sources should be reported as missing checks rather than inferred health.
 
 ## Test results
 
-- `env PYTHONPATH=src python3.8 -m compileall -q src tests scripts` -> passed.
-- `env PYTHONPATH=src python3.8 -m unittest discover -s tests -v` -> 97 tests passed.
+- `python3.8 -m compileall -q src tests scripts` -> passed.
+- `env PYTHONPATH=src python3.8 -m unittest discover -s tests -v` -> 104 tests passed.
 - `python3.8 scripts/build.py` -> passed.
-- `python3.8 dist/kdiag.pyz --version` -> `0.7.1`.
-- `python3.8 dist/kdiag.pyz self-test` -> passed; rule pack `2026.08.8`.
+- `python3.8 dist/kdiag.pyz --version` -> `0.8.0`.
+- `python3.8 dist/kdiag.pyz self-test` -> passed; rule pack `2026.08.10`.
 - `python3.8 dist/kdiag.pyz rules list` -> 98 rules.
 
 ## Suggested skills
@@ -37,4 +38,4 @@ Deckhouse runtime tools in `/opt/deckhouse/bin` will now be collected; remaining
 
 ## Next step
 
-Run one bounded snapshot against the same Deckhouse inventory and compare command coverage plus ledger counts with the 0.7.0 report.
+Run one bounded snapshot against the same Deckhouse inventory and inspect `Офлайн-разбор сообщений`, `message_insights`, and the `dns_smoke_events_suppressed` counter.

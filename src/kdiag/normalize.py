@@ -4,6 +4,7 @@ import re
 from collections import Counter, deque
 from datetime import datetime, timezone
 
+from kdiag.message_insights import match_message_insight
 from kdiag.npd_rules import NPD_CATEGORY_PATTERNS
 from kdiag.node_identity import match_node_identities
 from kdiag.runtime import ACTIVE_SERVICE_STATES, RUNTIME_SERVICE_UNITS, loaded_runtime_service_states, runtime_service_is_active
@@ -143,6 +144,9 @@ NODE_CONTEXT_CATEGORIES = {
 }
 NPD_CATEGORIES = {category for category, _pattern in NPD_CATEGORY_PATTERNS}
 DNS_COMPONENT_RE = re.compile(r"(?:^|[-_.])(coredns|kube-dns)(?:$|[-_.])", re.I)
+DNS_SMOKE_QUERY_RE = re.compile(r"\bsmoke-mini-[^\s\"']+", re.I)
+DNS_ERROR_CATEGORIES = frozenset(("dns_servfail", "dns_forward_loop", "dns_upstream_failure"))
+MESSAGE_POD_REF_RE = re.compile(r'\bpod\s*=\s*"([^"\s]+/[^"\s]+)"', re.I)
 
 
 def _clean_text(value, limit=1024):
@@ -289,31 +293,163 @@ def _command(snapshot, command_id):
     return {}
 
 
+def _bounded_add(values, value, limit):
+    if value is None or value in values:
+        return False
+    if len(values) >= limit:
+        return True
+    values.add(value)
+    return False
+
+
+def _update_unknown_context(entry, event):
+    first_timestamp = event.get("first_timestamp") or event.get("timestamp")
+    last_timestamp = event.get("last_timestamp") or event.get("timestamp")
+    first_epoch = _epoch(first_timestamp)
+    last_epoch = _epoch(last_timestamp)
+    if not event.get("timestamp_inferred") and (first_epoch is not None or last_epoch is not None):
+        if first_epoch is not None and (
+            entry.get("_first_seen_epoch") is None or first_epoch < entry["_first_seen_epoch"]
+        ):
+            entry["_first_seen_epoch"] = first_epoch
+            entry["first_seen"] = first_timestamp
+        if last_epoch is not None and (
+            entry.get("_last_seen_epoch") is None or last_epoch > entry["_last_seen_epoch"]
+        ):
+            entry["_last_seen_epoch"] = last_epoch
+            entry["last_seen"] = last_timestamp
+    elif event.get("timestamp"):
+        entry["inferred_time_samples"] += 1
+    entry["scope_truncated"] = _bounded_add(entry["_nodes"], event.get("node"), 20) or entry["scope_truncated"]
+    pod = None
+    if event.get("pod"):
+        pod = "{0}/{1}".format(event.get("namespace") or "unknown", event["pod"])
+    else:
+        pod_match = MESSAGE_POD_REF_RE.search(str(event.get("message_excerpt") or ""))
+        if pod_match:
+            pod = pod_match.group(1)
+    entry["scope_truncated"] = _bounded_add(entry["_pods"], pod, 50) or entry["scope_truncated"]
+    _bounded_add(entry["_sources"], event.get("source"), 20)
+    if event.get("evidence") and len(entry["examples"]) < 3:
+        entry["examples"].append(
+            {
+                "timestamp": event.get("timestamp"),
+                "timestamp_inferred": event.get("timestamp_inferred"),
+                "node": event.get("node"),
+                "namespace": event.get("namespace"),
+                "pod": event.get("pod"),
+                "source": event.get("source"),
+                "evidence": event.get("evidence"),
+                "message": event.get("message_excerpt"),
+            }
+        )
+
+
+def _new_unknown_entry(key, event, count, estimate_error):
+    entry = {
+        "component": key[0],
+        "fingerprint": key[1],
+        "template": _template(event["message_excerpt"]),
+        "count": count,
+        "estimate_error": estimate_error,
+        "first_seen": None,
+        "last_seen": None,
+        "inferred_time_samples": 0,
+        "scope_truncated": False,
+        "examples": [],
+        "_first_seen_epoch": None,
+        "_last_seen_epoch": None,
+        "_nodes": set(),
+        "_pods": set(),
+        "_sources": set(),
+    }
+    _update_unknown_context(entry, event)
+    return entry
+
+
+def _finalize_fingerprint(entry):
+    value = {key: item for key, item in entry.items() if not key.startswith("_")}
+    lower = max(0, int(entry.get("count") or 0) - int(entry.get("estimate_error") or 0))
+    upper = int(entry.get("count") or 0)
+    value["occurrence_range"] = {"minimum": lower, "maximum": upper}
+    value["count_is_exact"] = lower == upper
+    value["first_seen_epoch"] = entry.get("_first_seen_epoch")
+    value["last_seen_epoch"] = entry.get("_last_seen_epoch")
+    value["affected_nodes"] = sorted(entry.get("_nodes") or ())
+    value["affected_nodes_count"] = len(value["affected_nodes"])
+    value["affected_pods"] = sorted(entry.get("_pods") or ())
+    value["affected_pods_count"] = len(value["affected_pods"])
+    value["source_types"] = sorted(entry.get("_sources") or ())
+    first_epoch = entry.get("_first_seen_epoch")
+    last_epoch = entry.get("_last_seen_epoch")
+    if first_epoch is not None and last_epoch is not None:
+        span = max(0.0, float(last_epoch) - float(first_epoch))
+        value["observed_span_seconds"] = span
+        if span > 0:
+            hours = span / 3600.0
+            value["rate_per_hour_range"] = {
+                "minimum": round(lower / hours, 3),
+                "maximum": round(upper / hours, 3),
+            }
+        else:
+            value["rate_per_hour_range"] = None
+    else:
+        value["observed_span_seconds"] = None
+        value["rate_per_hour_range"] = None
+    insight = match_message_insight(value.get("component"), value.get("template"))
+    if insight:
+        value.update(insight)
+    return value
+
+
 def _append(events, unknown, stats, event):
     stats["input_records"] += 1
     stats["source_records"][event["source"]] += 1
-    if not event["categories"]:
-        stats["uncategorized_records"] += 1
+    if (
+        set(event.get("categories", ())) & DNS_ERROR_CATEGORIES
+        and DNS_COMPONENT_RE.search(str(event.get("component") or ""))
+        and DNS_SMOKE_QUERY_RE.search(str(event.get("message_excerpt") or ""))
+    ):
+        stats["dns_smoke_events_suppressed"] += int(event.get("occurrence_count") or 1)
+        return
+    insight = match_message_insight(event.get("component"), event.get("message_excerpt"))
+    if insight:
         key = (event.get("component") or event["source"], event["fingerprint"])
         entry = unknown.get(key)
+        weight = max(1, int(event.get("occurrence_count") or 1))
         if entry is None:
             estimate_error = 0
-            initial_count = 1
+            initial_count = weight
             if len(unknown) >= MAX_UNKNOWN_FINGERPRINTS:
                 victim_key, victim = min(unknown.items(), key=lambda item: (item[1]["count"], item[0]))
                 del unknown[victim_key]
                 estimate_error = victim["count"]
-                initial_count = estimate_error + 1
+                initial_count = estimate_error + weight
                 stats["unknown_fingerprint_replacements"] += 1
-            unknown[key] = {
-                "component": key[0],
-                "fingerprint": key[1],
-                "template": _template(event["message_excerpt"]),
-                "count": initial_count,
-                "estimate_error": estimate_error,
-            }
+            unknown[key] = _new_unknown_entry(key, event, initial_count, estimate_error)
         else:
-            entry["count"] += 1
+            entry["count"] += weight
+            _update_unknown_context(entry, event)
+    if not event["categories"]:
+        stats["uncategorized_records"] += 1
+        if insight:
+            return
+        key = (event.get("component") or event["source"], event["fingerprint"])
+        entry = unknown.get(key)
+        weight = max(1, int(event.get("occurrence_count") or 1))
+        if entry is None:
+            estimate_error = 0
+            initial_count = weight
+            if len(unknown) >= MAX_UNKNOWN_FINGERPRINTS:
+                victim_key, victim = min(unknown.items(), key=lambda item: (item[1]["count"], item[0]))
+                del unknown[victim_key]
+                estimate_error = victim["count"]
+                initial_count = estimate_error + weight
+                stats["unknown_fingerprint_replacements"] += 1
+            unknown[key] = _new_unknown_entry(key, event, initial_count, estimate_error)
+        else:
+            entry["count"] += weight
+            _update_unknown_context(entry, event)
         return
     stats["categorized_records"] += 1
     for category in event.get("categories", []):
@@ -798,6 +934,7 @@ def normalize_evidence(collection, node_snapshots, kubernetes):
         "dropped_records": 0,
         "unknown_fingerprint_replacements": 0,
         "cgroup_events_suppressed": 0,
+        "dns_smoke_events_suppressed": 0,
         "candidate_limit_drops": 0,
         "output_limit_drops": 0,
         "deduplicated_records": 0,
@@ -830,7 +967,12 @@ def normalize_evidence(collection, node_snapshots, kubernetes):
     events = _deduplicate_events(events, stats)
     events = _fair_limit_events(events, MAX_NORMALIZED_EVENTS, stats)
     events.sort(key=lambda event: (event.get("timestamp_epoch") or 0, event["event_id"]))
-    unknown_values = sorted(unknown.values(), key=lambda item: (-item["count"], item["component"], item["fingerprint"]))
+    fingerprint_values = [_finalize_fingerprint(item) for item in unknown.values()]
+    fingerprint_values.sort(key=lambda item: (-item["count"], item["component"], item["fingerprint"]))
+    message_insights = [item for item in fingerprint_values if item.get("insight_id")]
+    unknown_values = [item for item in fingerprint_values if not item.get("insight_id")]
+    stats["fingerprints_retained_total"] = len(fingerprint_values)
+    stats["message_insight_fingerprints"] = len(message_insights)
     stats["unknown_retained_fingerprints"] = len(unknown_values)
     stats["retained_source_records"] = dict(Counter(event["source"] for event in events))
     stats["source_records"] = dict(stats["source_records"])
@@ -844,5 +986,6 @@ def normalize_evidence(collection, node_snapshots, kubernetes):
         "stats": stats,
         "events": events,
         "correlations": correlate_events(events),
+        "message_insights": message_insights[:MAX_UNKNOWN_FINGERPRINTS],
         "unknown_fingerprints": unknown_values[:MAX_UNKNOWN_FINGERPRINTS],
     }

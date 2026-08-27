@@ -17,6 +17,7 @@
 - автономный rule pack для Node Problem Detector signatures, Pod lifecycle/rollouts/PDB, Service/CoreDNS/EndpointSlice, Prometheus, control-plane/etcd capacity, storage/CSI, runtime/Cilium, version skew, ресурсов, времени и сертификатов;
 - диагностика Cilium в режиме без kube-proxy по effective replacement setting и read-only service maps на узлах; само отсутствие kube-proxy не считается ошибкой;
 - разделение выводов на `fact`, `correlation` и `hypothesis`, нормализованные events и fingerprints неизвестных сообщений;
+- полностью автономные triage-карточки известных log templates с категориями routine/observe/actionable/security, частотой/временем/scope, локальными health-корреляциями, условиями решения, counter-evidence и missing checks;
 - coverage по каждой node command, Pod log и Kubernetes source, а также dependency-aware ledger выполнения правил со статусами `matched`, `not_matched`, `unknown`, `not_applicable`;
 - evidence cards с bounded excerpts, counter-evidence, missing checks, окнами сбора/корреляции и correlation timeline;
 - необязательные минимизированные пакеты для локальной LLM с выбранными evidence fragments и fail-closed псевдонимизированные пакеты для ручной работы с внешней LLM.
@@ -156,7 +157,7 @@ python3.8 dist/kdiag.pyz rules list
 python3.8 dist/kdiag.pyz rules explain kubernetes.node_not_ready
 ```
 
-`normalized-events.json.gz` содержит дедуплицированные категоризированные события, независимые scoped correlation episodes, явные counters усечения/отбрасывания по источникам и bounded approximate heavy hitters неизвестных fingerprints. Markdown-отчёт показывает сбалансированное по компонентам подмножество как компактные code-formatted templates; placeholders вида `<n>` остаются читаемыми. Исходные сообщения остаются confidential evidence; передавать этот файл за пределы контура без отдельного обезличивания нельзя.
+`normalized-events.json.gz` содержит дедуплицированные категоризированные события, независимые scoped correlation episodes, явные counters усечения/отбрасывания по источникам, offline message-insight cards и bounded approximate heavy hitters неизвестных fingerprints. Карточки объясняют известные сообщения и сопоставляют только уже имеющийся в snapshot evidence; это не findings, LLM, сеть и внешние API не используются. Markdown-отчёт сохраняет placeholders вида `<n>` читаемыми и показывает приблизительную частоту как гарантированный минимум и оценочную верхнюю границу. Исходные сообщения остаются confidential evidence; передавать этот файл за пределы контура без отдельного обезличивания нельзя.
 
 Kubernetes API audit logs, включая Deckhouse-specific audit backends, не собираются. Они не доступны через единый переносимый read-only Kubernetes API, могут содержать чувствительные request/response data и иметь большой объём. Безопасное добавление требует отдельного opt-in, зависящих от deployment путей/backends, жёстких лимитов по времени и объёму, а также отдельной редакции; поэтому их отсутствие в snapshot намеренно и не считается coverage error.
 

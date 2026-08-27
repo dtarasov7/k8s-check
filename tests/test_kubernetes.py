@@ -30,6 +30,7 @@ class KubernetesProjectionTest(unittest.TestCase):
             "metadata": {"name": "p", "namespace": "n", "annotations": {"token": "SECRET"}, "labels": {"app": "demo", "secret": "SECRET"}},
             "spec": {
                 "nodeName": "node-1",
+                "imagePullSecrets": [{"name": "registry-credentials"}],
                 "containers": [
                     {
                         "name": "app",
@@ -47,6 +48,7 @@ class KubernetesProjectionTest(unittest.TestCase):
         encoded = json.dumps(projected)
         self.assertNotIn("SECRET", encoded)
         self.assertEqual("demo", projected["metadata"]["labels"]["app"])
+        self.assertEqual(["registry-credentials"], projected["spec"]["imagePullSecrets"])
         self.assertEqual("/ready", projected["spec"]["containers"][0]["readinessProbe"]["httpGet"]["path"])
 
     def test_selectors_are_allowlisted(self):

@@ -6,6 +6,30 @@
 
 ## [Не выпущено]
 
+## [0.8.0] - 2026-08-26
+
+### Добавлено
+
+- Добавлен детерминированный офлайн-каталог распространённых шаблонов Kubernetes/Deckhouse. Triage-карточки относят сообщения к `routine`, `observe`, `actionable` или `security` и показывают объяснение, условие решения, рекомендацию, bounded-примеры, диапазон частоты, timestamps/rate, затронутые Node/Pod, локальные корреляции, counter-evidence и missing checks.
+- Карточки локально сопоставляются с readiness/restarts Pod, Events, API readyz, готовностью EndpointSlice и категоризированными ошибками journal. Allowlist-проекция Pod сохраняет имена `imagePullSecrets`, но объекты и содержимое Secrets по-прежнему не собираются.
+
+### Исправлено
+
+- Фильтр штатных DNS smoke-запросов Deckhouse исправлен на реальное имя `smoke-mini-*`. Подавляются только производные normalized events/findings; confidential raw evidence не изменяется.
+- Приблизительная частота fingerprints теперь выводится как гарантированный минимум и оценочная верхняя граница с явным описанием алгоритмической погрешности вместо неоднозначного `max error`.
+
+### Документация
+
+- Описан контракт offline triage-карточек и ограничения: это не findings, LLM и сеть не требуются, а отсутствующий source evidence или не встроенные сведения о версии продукта автоматически не восполняются.
+
+## [0.7.2] - 2026-08-26
+
+### Исправлено
+
+- Kubernetes bundle с агрегатным статусом `unreachable` теперь читается при построении отчёта. Реальные per-source статусы `failed`, `forbidden`, `timeout` и другие больше не превращаются в ложное `missing` для всех зависимых правил.
+- Gaps в rule ledger теперь содержат статус, одинаковая недоступная node command группируется по узлам, а перед таблицей выводятся основные причины `unknown`. Зависящие от намеренно отключённого Kubernetes collector правила получают `not_applicable`.
+- CoreDNS error events для штатного DNS probe `smoke-mini-*` исключаются из normalized derived output и findings. Исходный log evidence не изменяется и остаётся в confidential collection bundle.
+
 ## [0.7.1] - 2026-08-26
 
 ### Добавлено

@@ -6,6 +6,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-26
+
+### Added
+
+- Added a deterministic offline message-insight catalogue for common Deckhouse/Kubernetes log templates. Cards classify routine, observe, actionable, and security messages and provide an explanation, decision condition, recommendation, bounded examples, occurrence range, timestamps/rate, affected Node/Pod scope, local correlations, counter-evidence, and missing checks.
+- Message insights correlate locally available Pod readiness/restarts, Events, API readyz, EndpointSlice readiness, and categorized journal errors. Pod `imagePullSecrets` names are retained by the allowlist projection, while Secret objects and contents remain uncollected.
+
+### Fixed
+
+- Corrected the Deckhouse DNS smoke-query suppression to the actual `smoke-mini-*` name. Suppression affects only derived normalized events/findings; confidential raw evidence remains unchanged.
+- Approximate fingerprint counts are now displayed as a guaranteed minimum and estimated upper bound with an explicit algorithmic error explanation instead of the ambiguous `max error` label.
+
+### Documentation
+
+- Documented the offline triage-card contract and its limits: cards are not findings, do not require an LLM or network access, and cannot supply missing source evidence or product/version knowledge absent from the embedded catalogue.
+
+## [0.7.2] - 2026-08-26
+
+### Fixed
+
+- Kubernetes bundles with aggregate status `unreachable` are now loaded during report generation, preserving per-source statuses such as `failed` or `timeout` and errors such as `forbidden` instead of incorrectly reporting every dependent source as `missing`.
+- Rule-ledger gaps now include their status, group the same unavailable node command across nodes, and summarize the most common causes of `unknown`. Rules that depend on an intentionally disabled Kubernetes collector are `not_applicable`.
+- CoreDNS error events for the intentional `smoke-mini-*` DNS probe are suppressed from normalized derived output and findings. Original log evidence remains unchanged in the confidential collection bundle.
+
 ## [0.7.1] - 2026-08-26
 
 ### Added

@@ -2,12 +2,56 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kdiag.report import RULE_COVERAGE_REQUIREMENTS, _rule_ledger, _select_unknown_fingerprints, build_report
+from kdiag.report import (
+    RULE_COVERAGE_REQUIREMENTS,
+    _compact_missing_evidence,
+    _coverage,
+    _rule_ledger,
+    _render_message_insights,
+    _select_unknown_fingerprints,
+    build_report,
+    load_collection,
+)
 from kdiag.rule_catalog import RULE_CATALOG
 from kdiag.util import atomic_write_gzip_json, atomic_write_json, markdown_code, markdown_escape
 
 
 class ReportTest(unittest.TestCase):
+    def test_message_insight_render_explains_estimates_and_decision_context(self):
+        lines = []
+        _render_message_insights(
+            lines,
+            [
+                {
+                    "insight_id": "demo",
+                    "category": "actionable",
+                    "title": "Проверка <n>",
+                    "component": "demo",
+                    "template": "failure code <n>",
+                    "decision_state": "investigate",
+                    "occurrence_range": {"minimum": 3, "maximum": 4},
+                    "estimate_error": 1,
+                    "affected_nodes": ["node-a"],
+                    "affected_nodes_count": 1,
+                    "affected_pods": ["demo/pod-a"],
+                    "affected_pods_count": 1,
+                    "explanation": "Описание",
+                    "checks": [{"name": "pod_state", "status": "problem", "summary": "not ready"}],
+                    "counter_evidence": ["readyz healthy"],
+                    "missing_checks": ["secret content is not collected"],
+                    "decision_condition": "Решить при повторении",
+                    "recommendation": "Проверить Pod",
+                }
+            ],
+        )
+        rendered = "\n".join(lines)
+        self.assertIn("Офлайн-разбор сообщений", rendered)
+        self.assertIn("гарантированно не менее 3, оценочная верхняя граница 4", rendered)
+        self.assertIn("Контр-доказательства: readyz healthy", rendered)
+        self.assertIn("Условие решения: Решить при повторении", rendered)
+        self.assertIn("`failure code <n>`", rendered)
+        self.assertNotIn("&lt;", rendered)
+
     def test_markdown_uses_readable_angle_brackets_and_balanced_unknowns(self):
         self.assertEqual(r"\<n\>", markdown_escape("<n>"))
         self.assertEqual("`<n>`", markdown_code("<n>"))
@@ -44,9 +88,68 @@ class ReportTest(unittest.TestCase):
         self.assertEqual("not_matched", ledger["node.low_root_disk"]["status"])
         self.assertEqual("not_matched", ledger["kubernetes.node_not_ready"]["status"])
         self.assertEqual("unknown", ledger["runtime.cri_not_ready"]["status"])
+        self.assertEqual(
+            ["node/n1/command/runtime_crictl_info:unsupported"],
+            ledger["runtime.cri_not_ready"]["missing_evidence"],
+        )
         self.assertEqual("unknown", ledger["kubernetes.failed_scheduling"]["status"])
+        self.assertEqual(
+            ["kubernetes/events:failed"],
+            ledger["kubernetes.failed_scheduling"]["missing_evidence"],
+        )
         self.assertEqual("unknown", ledger["dns.coredns_errors"]["status"])
         self.assertEqual("not_applicable", ledger["etcd.unhealthy"]["status"])
+
+    def test_unreachable_kubernetes_bundle_keeps_source_failure_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            atomic_write_gzip_json(
+                root / "kubernetes.json.gz",
+                {
+                    "sources": {
+                        "nodes": {"status": "failed", "required": True, "error": "forbidden"},
+                    },
+                    "logs": {"status": "source_unavailable", "entries": []},
+                },
+            )
+            atomic_write_json(
+                root / "collection.json",
+                {
+                    "nodes": [],
+                    "kubernetes": {"status": "unreachable", "file": "kubernetes.json.gz"},
+                    "prometheus": {"status": "not_configured"},
+                },
+            )
+            collection, nodes, kubernetes, _prometheus = load_collection(root)
+            self.assertEqual("failed", kubernetes["sources"]["nodes"]["status"])
+            ledger = {
+                item["rule_id"]: item
+                for item in _rule_ledger([], _coverage(collection, nodes, kubernetes), {})
+            }
+            self.assertEqual(
+                ["kubernetes/nodes:failed"],
+                ledger["kubernetes.node_not_ready"]["missing_evidence"],
+            )
+
+    def test_disabled_kubernetes_rules_are_not_applicable_and_node_gaps_compact(self):
+        ledger = {
+            item["rule_id"]: item
+            for item in _rule_ledger(
+                [],
+                [{"source": "kubernetes", "status": "disabled", "required": False}],
+                {},
+            )
+        }
+        self.assertEqual("not_applicable", ledger["kubernetes.node_not_ready"]["status"])
+        self.assertEqual(
+            ["node/*/command/journal_services_current:unsupported (2 nodes)"],
+            _compact_missing_evidence(
+                [
+                    "node/n1/command/journal_services_current:unsupported",
+                    "node/n2/command/journal_services_current:unsupported",
+                ]
+            ),
+        )
 
     def test_partial_collection_produces_reports(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -2,7 +2,7 @@
 
 ## 1. Назначение и границы решения
 
-<code>kdiag 0.7.1</code> создаёт разовый аварийный снимок Kubernetes-кластера и выполняет полностью автономный детерминированный анализ. Текущий scope диагностической совместимости — vanilla Kubernetes и Deckhouse CSE Pro 1.74 с Kubernetes 1.24–1.31, до 20 узлов и около 1000 Pod. Это scope форматов evidence и правил, а не заявление о lifecycle support.
+<code>kdiag 0.8.0</code> создаёт разовый аварийный снимок Kubernetes-кластера и выполняет полностью автономный детерминированный анализ. Текущий scope диагностической совместимости — vanilla Kubernetes и Deckhouse CSE Pro 1.74 с Kubernetes 1.24–1.31, до 20 узлов и около 1000 Pod. Это scope форматов evidence и правил, а не заявление о lifecycle support.
 
 Программа запускается на отдельном управляющем сервере. Она подключается к каждому узлу по SSH, выполняет диагностические команды через неинтерактивный sudo и опрашивает Kubernetes API с отдельным kubeconfig. Prometheus необязателен: снимок можно получить при недоступности Prometheus или всего Kubernetes API.
 
@@ -351,7 +351,7 @@ Host evidence сохранится, но структурные Kubernetes-пр�
 | <code>node-&lt;inventory-host&gt;.json.gz</code> | Evidence и статусы команд одного узла. |
 | <code>kubernetes.json.gz</code> | Ресурсы API, readyz и ограниченные Pod logs. |
 | <code>prometheus.json.gz</code> | Необязательный ограниченный evidence Prometheus. |
-| <code>normalized-events.json.gz</code> | Нормализованные записи, fingerprints и корреляции; конфиденциально. |
+| <code>normalized-events.json.gz</code> | Нормализованные записи, offline message insights, fingerprints и корреляции; конфиденциально. |
 | <code>facts.json</code> | Выведенные структурированные факты. |
 | <code>findings.json</code> | Машиночитаемые срабатывания правил. |
 | <code>report.json</code> | Общий машиночитаемый отчёт. |
@@ -362,7 +362,11 @@ Inventory alias и имя Kubernetes Node могут отличаться. Од�
 
 Coverage фиксируется для каждой node command, группы node Pod logs, Kubernetes source и отдельной записи Kubernetes logs. Collected parent bundle не скрывает внутренний `failed`, `timeout` или `truncated`. В `facts.json`, `findings.json` и `report.json` записывается ledger правил: `matched`, `not_matched`, `unknown` с отсутствующим evidence либо `not_applicable`. Каждое правило объявляет собственные требования coverage: например, отказ Events влияет на event-dependent правила, но не на проверку Node condition при собранном Nodes source. `unknown` — rule-specific пробел evidence, а не признак здоровья.
 
-Раздел unknown fingerprints в `report.md` носит справочный характер и не является finding. Он показывает сбалансированное по компонентам подмножество — не более пяти templates на компонент, ограничивает длинные строки и выводит placeholders вида `<n>` и `<ipv6>` в читаемом code formatting. Полный bounded-набор сохраняется в `normalized-events.json.gz`.
+В Markdown ledger показывается реальный статус отсутствующего source, а одинаковая недоступная command группируется по узлам. Сводка перед таблицей объясняет, почему много правил имеют `unknown`: например, один недоступный Kubernetes API snapshot влияет на все правила, которым нужны Nodes, Pods, Events или workloads. При намеренно отключённом Kubernetes collector зависимые правила получают `not_applicable`. Даже Kubernetes bundle со статусом `unreachable` читается для сохранения per-source причин отказа.
+
+Раздел офлайн-разбора сообщений носит справочный характер и не является finding. Встроенный версионируемый каталог относит известные templates к `routine`, `observe`, `actionable` или `security`; показывает диапазон частоты, первый/последний timestamp, rate, затронутые Node/Pod, объяснение, условие решения, рекомендацию и статические справочные URL; сопоставляет доступные readiness/restarts Pod, Events, readyz, EndpointSlice и категоризированные ошибки journal. Counter-evidence и недоступные проверки выводятся явно. LLM, сеть и внешние API не используются. Карточка не восстанавливает несобранный evidence и не доказывает влияние или причинность.
+
+Оставшийся раздел unknown fingerprints также является справочным. Он показывает сбалансированное по компонентам подмножество — не более пяти templates на компонент, ограничивает длинные строки и выводит placeholders вида `<n>` и `<ipv6>` в читаемом code formatting. Приблизительная частота показывается как гарантированный минимум и оценочная верхняя граница с алгоритмической погрешностью, а не как severity. Полный bounded-набор сохраняется в `normalized-events.json.gz`.
 
 ~~~bash
 python3.8 dist/kdiag.pyz report /var/lib/kdiag/COLLECTION_ID
@@ -380,6 +384,8 @@ python3.8 dist/kdiag.pyz verify /var/lib/kdiag/COLLECTION_ID
 Отсутствие finding не доказывает отсутствие проблемы. Evidence мог оказаться за временным окном, быть усечён, запрещён RBAC, находиться на недоступном узле, иметь неизвестную сигнатуру или нестандартное расположение.
 
 Нормализуются journald JSON, прямые CRI logs, Kubernetes Events, Node conditions, состояния Pod/контейнеров, выбранные Pod logs и systemd. Записи дедуплицируются, output справедливо ограничивается по source/scope/category, inferred timestamps исключаются из причинных correlations. Результат корреляции состоит из независимых Pod- или Node-scoped episodes с началом, концом, duration и episode ID. Усечение создаёт явные per-source counters и finding.
+
+CoreDNS error records с query name, начинающимся с `smoke-mini-`, считаются шумом штатной Deckhouse smoke-проверки и исключаются из normalized events и findings. Confidential raw log bundle не перезаписывается.
 
 ## 12. Подробное описание проверок
 

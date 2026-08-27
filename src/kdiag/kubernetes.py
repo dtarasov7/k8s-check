@@ -276,6 +276,13 @@ def project_pod(item):
                 ],
             } if spec.get("dnsConfig") else None,
             "restartPolicy": spec.get("restartPolicy"),
+            "imagePullSecrets": sorted(
+                {
+                    str(value.get("name"))[:253]
+                    for value in (spec.get("imagePullSecrets") or [])[:50]
+                    if isinstance(value, dict) and value.get("name")
+                }
+            ),
             "nodeSelector": {
                 key: value
                 for key, value in (spec.get("nodeSelector") or {}).items()

@@ -2,7 +2,7 @@
 
 ## 1. Purpose and scope
 
-<code>kdiag 0.7.1</code> creates a one-time emergency snapshot of a Kubernetes cluster and performs deterministic, fully offline analysis. Its current diagnostic compatibility scope is vanilla Kubernetes and Deckhouse CSE Pro 1.74 with Kubernetes 1.24–1.31, up to 20 nodes and about 1,000 Pods. This describes evidence/rule compatibility, not lifecycle support.
+<code>kdiag 0.8.0</code> creates a one-time emergency snapshot of a Kubernetes cluster and performs deterministic, fully offline analysis. Its current diagnostic compatibility scope is vanilla Kubernetes and Deckhouse CSE Pro 1.74 with Kubernetes 1.24–1.31, up to 20 nodes and about 1,000 Pods. This describes evidence/rule compatibility, not lifecycle support.
 
 The program runs on a separate management server. It connects to every node over SSH, runs read-only inspection through non-interactive sudo, and queries the Kubernetes API using a dedicated kubeconfig. Prometheus is optional: the snapshot still works when Prometheus or the entire Kubernetes API is unavailable.
 
@@ -349,7 +349,7 @@ Each run creates <code>&lt;output&gt;/&lt;collection-id&gt;/</code>:
 | <code>node-&lt;inventory-host&gt;.json.gz</code> | Per-node evidence and command statuses. |
 | <code>kubernetes.json.gz</code> | API resources, readyz output, bounded Pod logs. |
 | <code>prometheus.json.gz</code> | Optional bounded Prometheus evidence. |
-| <code>normalized-events.json.gz</code> | Normalized records/fingerprints/correlations; confidential. |
+| <code>normalized-events.json.gz</code> | Normalized records, offline message insights, fingerprints, and correlations; confidential. |
 | <code>facts.json</code> | Derived facts used by rules. |
 | <code>findings.json</code> | Machine-readable findings. |
 | <code>report.json</code> | Combined machine-readable report. |
@@ -360,7 +360,11 @@ Inventory aliases and Kubernetes Node names may differ. Unambiguous hostname/FQD
 
 Coverage is recorded for every node command, node Pod-log group, Kubernetes source, and Kubernetes log entry. A collected parent bundle does not hide an inner `failed`, `timeout`, or `truncated` check. `facts.json`, `findings.json`, and `report.json` include a rule evaluation ledger: `matched`, `not_matched`, `unknown` with missing evidence, or `not_applicable`. Each rule declares its own coverage requirements, so a failed Events query affects event-dependent rules but not a Node-condition rule whose Nodes source was collected. Treat `unknown` as an explicit rule-specific evidence gap, not as a healthy result.
 
-The unknown-fingerprint section in `report.md` is informational rather than a finding. It shows a component-balanced subset of at most five templates per component, limits long templates, and preserves placeholders such as `<n>` and `<ipv6>` in readable code formatting. The complete bounded set remains in `normalized-events.json.gz`.
+The Markdown ledger includes the actual missing-source status and groups the same unavailable command across nodes. Its leading cause summary explains why many rules are `unknown`; for example, one unavailable Kubernetes API snapshot can affect every rule that requires Nodes, Pods, Events, or workloads. If Kubernetes collection was intentionally disabled, dependent rules are `not_applicable` instead. Even an `unreachable` Kubernetes bundle is read to retain its per-source failure details.
+
+The offline message-insight section is informational rather than a finding. Its embedded, versioned catalogue classifies recognized templates as `routine`, `observe`, `actionable`, or `security`; shows the occurrence range, first/last timestamps, rate, affected Nodes/Pods, explanation, decision condition, recommendation, and static reference URLs; and correlates available Pod readiness/restarts, Events, readyz, EndpointSlices, and categorized journal errors. Counter-evidence and unavailable checks are explicit. No LLM, network, or external API is used. A card cannot recover evidence that was not collected and must not be read as proof of impact or causality.
+
+The remaining unknown-fingerprint section is also informational. It shows a component-balanced subset of at most five templates per component, limits long templates, and preserves placeholders such as `<n>` and `<ipv6>` in readable code formatting. Approximate counts are displayed as a guaranteed minimum and estimated upper bound with algorithmic error, not as severity. The complete bounded set remains in `normalized-events.json.gz`.
 
 ~~~bash
 python3.8 dist/kdiag.pyz report /var/lib/kdiag/COLLECTION_ID
@@ -378,6 +382,8 @@ Read collection status/evidence gaps first, then facts, correlations, and hypoth
 No finding does not mean no problem. Evidence may be outside the time window, truncated, denied, unreachable, unknown to the rule pack, or stored in a non-standard layout.
 
 The normalizer handles journald JSON, direct CRI logs, Kubernetes Events, Node conditions, Pod/container states, selected Pod logs, and systemd states. It deduplicates records, fairly limits output across source/scope/category buckets, and excludes inferred timestamps from causal correlations. Correlation output consists of independent Pod- or Node-scoped episodes with start, end, duration, and episode ID. Truncation produces explicit per-source counters and a finding.
+
+CoreDNS error records whose query name starts with `smoke-mini-` are treated as intentional Deckhouse smoke-probe noise and excluded from normalized events and findings. The confidential raw log bundle is not rewritten.
 
 ## 12. Detailed check catalogue
 

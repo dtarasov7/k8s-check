@@ -17,6 +17,7 @@
 - an autonomous rule pack for Node Problem Detector signatures, Pod lifecycle/rollouts/PDB, Service/CoreDNS/EndpointSlice, Prometheus, control-plane/etcd capacity, storage/CSI, runtime/Cilium, version skew, resources, time, and certificates;
 - kube-proxy-free Cilium diagnostics based on the effective replacement setting and read-only per-node Cilium service maps; absence of kube-proxy alone is not an error;
 - findings classified as `fact`, `correlation`, or `hypothesis`, normalized events, and fingerprints for unknown messages;
+- fully offline triage cards for recognized log templates, with routine/observe/actionable/security classification, occurrence/time/scope context, local health correlations, decision conditions, counter-evidence, and missing checks;
 - per-command, per-Pod-log, and per-Kubernetes-source coverage plus a dependency-aware rule evaluation ledger with `matched`, `not_matched`, `unknown`, and `not_applicable` states;
 - evidence cards with bounded excerpts, counter-evidence, missing checks, collection/correlation windows, and a correlation timeline;
 - optional minimized local LLM packages with selected evidence fragments and fail-closed pseudonymized packages for a manually operated external LLM.
@@ -156,7 +157,7 @@ python3.8 dist/kdiag.pyz rules list
 python3.8 dist/kdiag.pyz rules explain kubernetes.node_not_ready
 ```
 
-`normalized-events.json.gz` contains deduplicated categorized events, independent scoped correlation episodes, explicit truncation/drop counters by source, and bounded approximate heavy hitters for unknown fingerprints. The Markdown report shows a component-balanced subset as compact code-formatted templates; placeholders such as `<n>` remain readable. Original messages remain confidential evidence; do not transfer this file outside the trusted environment without a separate redaction review.
+`normalized-events.json.gz` contains deduplicated categorized events, independent scoped correlation episodes, explicit truncation/drop counters by source, offline message-insight cards, and bounded approximate heavy hitters for unknown fingerprints. Recognized cards explain common messages and correlate only evidence already present in the snapshot; they are not findings and do not use an LLM, network, or external API. The Markdown report keeps placeholders such as `<n>` readable and describes approximate frequency as a guaranteed minimum plus an estimated upper bound. Original messages remain confidential evidence; do not transfer this file outside the trusted environment without a separate redaction review.
 
 Kubernetes API audit logs are not collected, including Deckhouse-specific audit backends. They are not exposed through a portable read-only Kubernetes API, may contain sensitive request or response data, and can be very large. Adding them safely requires a separate explicit opt-in with deployment-specific paths/backends, strict byte and time limits, and dedicated redaction; their absence from the snapshot is therefore intentional rather than a coverage error.
 
