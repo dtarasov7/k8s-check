@@ -2,7 +2,7 @@
 
 ## 1. Назначение и границы решения
 
-<code>kdiag 0.8.1</code> создаёт разовый аварийный снимок Kubernetes-кластера и выполняет полностью автономный детерминированный анализ. Текущая диагностическая совместимость — vanilla Kubernetes и Deckhouse CSE Pro 1.74 с Kubernetes 1.24–1.31, до 20 узлов и около 1000 Pod. Это совместимость форматов исходных данных и проверок, а не заявление о lifecycle support.
+<code>kdiag 0.9.0</code> создаёт разовый аварийный снимок Kubernetes-кластера и выполняет полностью автономный детерминированный анализ. Текущая диагностическая совместимость — vanilla Kubernetes и Deckhouse CSE Pro 1.74 с Kubernetes 1.24–1.31, до 20 узлов и около 1000 Pod. Это совместимость форматов исходных данных и проверок, а не заявление о lifecycle support.
 
 Программа запускается на отдельном управляющем сервере. Она подключается к каждому узлу по SSH, выполняет диагностические команды через неинтерактивный sudo и опрашивает Kubernetes API с отдельным kubeconfig. Prometheus необязателен: снимок можно получить при недоступности Prometheus или всего Kubernetes API.
 
@@ -86,7 +86,9 @@ Read-only проверка stacked etcd в стиле kubeadm выполняет
 /etc/kubernetes/pki/etcd/healthcheck-client.key
 ~~~
 
-Используется установленный на узле etcdctl либо crictl для вызова etcdctl внутри уже работающего локального контейнера etcd. Для внешнего etcd и нестандартной раскладки будет сформирован evidence gap, а не недостоверный диагноз.
+Сначала через crictl вызывается etcdctl внутри уже работающего локального контейнера etcd, что соответствует static Pod Deckhouse; host etcdctl остаётся fallback для vanilla-раскладок. Для внешнего etcd и нестандартной раскладки будет сформировано сообщение о недоступной проверке, а не недостоверный диагноз.
+
+Для Cilium сначала проверяются host-команды `cilium`, `cilium-dbg` и `cilium-debug`. Если их нет, те же ограниченные read-only команды status/service list запускаются через crictl в работающем контейнере `cilium-agent`. Право Kubernetes `pods/exec` не требуется.
 
 ## 5. Сборка, тестирование и перенос в изолированный контур
 
@@ -121,7 +123,9 @@ python3.8 kdiag.pyz self-test
 
 Перед применением манифеста нужно проверить subjects во всех binding. Нельзя добавлять Secrets, pods/exec или write-глаголы. Roles для прикладных namespace автоматически не создаются: необходимо создать аналогичные namespaced Role и RoleBinding, привязать их к <code>kdiag-system/kdiag-reader</code> и добавить в конфигурацию только согласованный namespace.
 
-Сборщик читает Nodes, Pods, Events, workload-объекты, Services, EndpointSlices, PDB, PVC, PV, APIService, Leases, VolumeAttachments, CSI-объекты, StorageClasses, NetworkPolicies, выбранные Cilium CRD, разрешённые поля ConfigMap <code>cilium-config</code> и <code>coredns</code>, non-resource URL <code>/readyz</code> и журналы Pod только в разрешённых namespace. Discovery ConfigMap сначала проверяет Deckhouse locations (`d8-cni-cilium`, `d8-kube-dns`), затем vanilla `kube-system`, сохраняя все attempts и выбранный object.
+Сборщик читает Nodes, Pods, Events, workload-объекты, Services, EndpointSlices, PDB, PVC, PV, APIService, Leases, VolumeAttachments, CSI-объекты, StorageClasses, NetworkPolicies, выбранные Cilium CRD, разрешённые поля DNS/Cilium ConfigMap, non-resource URL <code>/readyz</code> и журналы Pod только в разрешённых namespace. Discovery распознаёт Deckhouse ConfigMap `d8-cni-cilium/cilium-configmap`, `d8-kube-dns/d8-kube-dns` и `d8-kube-dns/node-local-dns`, затем проверяет прежние Deckhouse и vanilla-имена `cilium-config`, `coredns` и `node-local-dns`, сохраняя все попытки и выбранный объект.
+
+Встроенные DNS-проверки распознают backend `d8-kube-dns`, прежние варианты Service `d8-kube-dns-redirect`, ExternalName alias `kube-dns`, `node-local-dns` и vanilla kube-dns/CoreDNS. Среди других проверенных расхождений платформы учтены необязательный kube-proxy при Cilium replacement, `containerd-deckhouse.service`, а также etcd/Cilium CLI внутри контейнеров. Общие проверки ресурсов не зависят от специальных имён.
 
 ### Создание kubeconfig для kdiag-reader
 
@@ -260,6 +264,8 @@ Inventory alias не обязан совпадать с <code>metadata.name</cod
 | Ключ | По умолчанию | Назначение |
 |---|---:|---|
 | <code>prometheus.url</code> | null | Необязательный URL; null отключает источник. |
+| <code>prometheus.username</code> | null | Необязательное имя HTTP Basic; задаётся вместе с паролем. |
+| <code>prometheus.password</code> | null | Необязательный пароль HTTP Basic; в collection не копируется. Файл конфигурации должен иметь режим 0600. |
 | <code>prometheus.timeout_seconds</code> | 3 | Короткий таймаут, чтобы Prometheus не блокировал аварийный сбор. |
 | <code>prometheus.max_response_bytes</code> | 1048576 | Максимальный размер ответа. |
 
@@ -331,7 +337,7 @@ python3.8 dist/kdiag.pyz snapshot -i inventory.ini -g k8s_nodes \
   --config config/snapshot.json --skip-kubernetes -o /var/lib/kdiag
 ~~~
 
-Host evidence сохранится, но структурные Kubernetes-проверки не выполнятся. Prometheus можно задать через <code>--prometheus-url http://host:9090</code>.
+Host evidence сохранится, но структурные Kubernetes-проверки не выполнятся. Prometheus можно задать через <code>--prometheus-url http://host:9090</code>. Для HTTP Basic authentication используются ключи JSON выше либо безопасная для истории процессов форма <code>--prometheus-username USER --prometheus-password-file /secure/prometheus-password</code>. Файл пароля локально читается как UTF-8, завершающий перевод строки удаляется, учётные данные в snapshot не записываются.
 
 | Код | Значение | Действие |
 |---:|---|---|
@@ -364,9 +370,9 @@ Inventory alias и имя Kubernetes Node могут отличаться. Од�
 
 Сводка Markdown объясняет, почему проверки не выполнены и сколько проверок зависит от каждого отсутствующего источника; полный технический список остаётся в `report.json`. При намеренно отключённом сборе Kubernetes зависимые проверки помечаются как неприменимые. Даже недоступный Kubernetes bundle читается для сохранения точных причин отказа отдельных источников.
 
-Встроенный каталог по-прежнему классифицирует известные сообщения как штатные, требующие наблюдения, требующие внимания или относящиеся к безопасности. Штатные сообщения и сообщения для наблюдения остаются в конфиденциальном `normalized-events.json.gz`; в `report.md` и `report.json` выводятся только требующие внимания сообщения, для которых ещё нет отдельной детерминированной проверки. LLM, сеть и внешние API не используются.
+Встроенный каталог классифицирует известные сообщения как штатные, требующие наблюдения, требующие внимания или относящиеся к безопасности. Успешная распаковка образа, создание Pod StatefulSet, выдача cert-manager, настройка kube-rbac-proxy и работа DNS cleaner остаются только в конфиденциальном `normalized-events.json.gz`. Штатное сообщение выводится оператору лишь тогда, когда локальное сопоставление обнаружило нездоровый связанный Pod или другой явный признак проблемы; также выводятся сообщения, требующие внимания/проверки безопасности и не дублирующие отдельную детерминированную проверку. LLM, сеть и внешние API не используются.
 
-Для Deckhouse authentication config на узле собираются только метаданные файла `/etc/kubernetes/deckhouse/extra-files/authentication-config.yaml`, но не содержимое. Запись журнала доказывает ошибку чтения только в момент своего timestamp. Отчёт отдельно проверяет текущее наличие файла на host, API readyz и готовность Pod kube-apiserver и явно предупреждает, что видимость внутри mount namespace контейнера напрямую не проверяется.
+Для Deckhouse authentication config на узле собираются только метаданные файла `/etc/kubernetes/deckhouse/extra-files/authentication-config.yaml`, но не содержимое. Одиночная ошибка чтения при restart/reconciliation считается нормальной кратковременной гонкой и не выводится. Повторные записи сопоставляются с текущим наличием файла на host, API readyz и готовностью Pod kube-apiserver; видимость внутри mount namespace контейнера напрямую не проверяется.
 
 Журналы текущей загрузки запрашиваются от новых записей к старым. Если `collection.max_command_bytes` приводит к усечению, сохраняются ближайшие к инциденту новые записи. При таком предупреждении следует увеличить лимит либо уменьшить `collection.since_hours`.
 
@@ -511,14 +517,14 @@ python3.8 dist/kdiag.pyz rules list --json
 | <code>dns.cluster_dns_mismatch</code> | fact | Явный kubelet clusterDNS не пересекается с ClusterIP kube-dns. | Проверить все address families и источники kubelet config, затем контролируемый rollout. |
 | <code>dns.nameserver_limit_exceeded</code> | fact | Resolver kubelet содержит более трёх nameserver. | Проверить kubelet resolvConf и при необходимости утверждённый local caching resolver. |
 | <code>dns.coredns_errors</code> | fact | В CoreDNS logs есть SERVFAIL, forwarding loop или upstream failure. Отчёт группирует до 20 извлечённых query names по типу и частоте, сохраняя ссылки на исходные строки. | Проверить имена на опечатки и несуществующие zones, затем forward targets, loop plugin, upstream reachability и resolver узлов. |
-| <code>dns.coredns_config_empty</code> | fact | ConfigMap coredns не содержит непустой Corefile. | Восстановить утверждённый Corefile через change control. |
+| <code>dns.coredns_config_empty</code> | fact | Собранный ConfigMap d8-kube-dns, node-local-dns или vanilla coredns не содержит непустой Corefile. | Восстановить утверждённый Corefile через change control. |
 
 ### 12.8 Control plane и API
 
 | Правило | Тип | Что проверяется | Безопасное первое действие |
 |---|---|---|---|
 | <code>controlplane.api_readyz_failed</code> | fact | Полученный readyz verbose содержит failed subcheck либо ошибку endpoint. | Использовать имя subcheck для выбора evidence apiserver/зависимости. |
-| <code>controlplane.authentication_config_read_error</code> | fact | kube-apiserver сообщает, что настроенный authentication file нельзя прочитать. | Проверить effective flag, mount/path, права и окно Deckhouse reconciliation; не создавать пустой файл вместо отсутствующего. |
+| <code>controlplane.authentication_config_read_error</code> | fact | kube-apiserver повторно сообщает, что настроенный authentication file нельзя прочитать; одиночная кратковременная запись подавляется. | Проверить текущие метаданные host-файла, readyz, готовность Pod, mount/path, права и окно Deckhouse reconciliation; не создавать пустой файл вместо отсутствующего. |
 | <code>controlplane.apiservice_unavailable</code> | fact | Aggregated APIService имеет Available=False или Unknown. | Изучить reason, backing Service/endpoints, TLS и extension server. |
 | <code>controlplane.node_lease_stale</code> | correlation | Lease отсутствует либо старше нового peer Lease более чем на max(120 с, 3 x leaseDurationSeconds). | Сравнить kubelet, доступ к API и часы; учесть глобальную остановку API. |
 | <code>controlplane.static_pod_unhealthy</code> | fact | Собранный mirror Pod etcd/apiserver/scheduler/controller-manager отсутствует или нездоров. | Сопоставить с control-plane node, проверить manifest, kubelet, container и зависимости. |

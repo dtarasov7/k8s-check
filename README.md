@@ -65,7 +65,9 @@ On cluster nodes:
 - non-interactive root access through `sudo -n` for the current SSH account;
 - standard system utilities. The fixed safe `PATH` includes `/opt/deckhouse/bin` before standard system directories. A missing utility is reported as an unavailable command with status `unsupported` and does not imply that a similarly named kernel subsystem or data file is absent.
 
-On control-plane nodes, `collect_etcd=true` uses either a host `etcdctl` or `crictl exec` in the existing static etcd Pod. It runs only `endpoint status`, `endpoint health`, and `alarm list` with standard kubeadm health-check TLS paths. Private-key contents are never read into the bundle. External or non-kubeadm etcd is reported as `not_applicable` or `unavailable`.
+On control-plane nodes, `collect_etcd=true` first uses `crictl exec` to run `etcdctl` in the existing static etcd Pod and falls back to a host `etcdctl`. It runs only `endpoint status`, `endpoint health`, and `alarm list` with standard kubeadm health-check TLS paths. Private-key contents are never read into the bundle. External or non-kubeadm etcd is reported as `not_applicable` or `unavailable`.
+
+If host Cilium CLIs are absent, kdiag can run the same read-only status and service-list commands through `crictl exec` in a running `cilium-agent` container. Kubernetes `pods/exec` is not used.
 
 Broad `sudo` access makes the SSH account highly privileged independently of `kdiag`. For regular operation, use a root-owned wrapper and a narrow `sudoers` rule. The initial emergency implementation assumes an already approved access model.
 
@@ -80,7 +82,7 @@ The `dist/kdiag.pyz` artifact contains only project source code; Python's standa
 
 ## Configuration
 
-Copy the [configuration example](config/snapshot.example.json) and set a dedicated kubeconfig. Do not add passwords, SSH private keys, or Kubernetes tokens to the JSON file; configuration contains paths only.
+Copy the [configuration example](config/snapshot.example.json) and set a dedicated kubeconfig. Do not add SSH private keys or Kubernetes tokens. The only supported configuration secret is an optional Prometheus Basic Auth password; protect such a file with mode `0600`, or use `--prometheus-password-file` so the password is not present in the process command line.
 
 The safe default for application namespaces is an empty list. Approve namespaces in JSON or with the repeatable `--application-namespace` option.
 
@@ -107,6 +109,7 @@ Useful options:
 - `--skip-cgroup` — skip direct cgroup facts and suppress cgroup events/findings;
 - `--skip-kubernetes` — collect node evidence only;
 - `--prometheus-url URL` — optional best-effort Prometheus evidence;
+- `--prometheus-username USER` and `--prometheus-password-file FILE` — optional Prometheus HTTP Basic authentication;
 - `--application-namespace NAME` — explicitly approve logs from a namespace.
 
 `ansible_ssh_common_args` and `ansible_ssh_extra_args` are intentionally not executed. For ProxyJump or complex inventory routing, create a reviewed OpenSSH alias and use it as `ansible_host`.
@@ -157,7 +160,7 @@ python3.8 dist/kdiag.pyz rules list
 python3.8 dist/kdiag.pyz rules explain kubernetes.node_not_ready
 ```
 
-`normalized-events.json.gz` contains deduplicated categorized events, independent scoped correlation episodes, explicit truncation/drop counters by source, offline message-insight cards, and bounded approximate heavy hitters for unknown fingerprints. Recognized cards explain common messages and correlate only data already present in the snapshot; they are not findings and do not use an LLM, network, or external API. Routine/observe cards stay in this machine-readable confidential file; only actionable/security cards without a duplicate finding enter the operator report. Original messages remain confidential; do not transfer this file outside the trusted environment without a separate redaction review.
+`normalized-events.json.gz` contains deduplicated categorized events, independent scoped correlation episodes, explicit truncation/drop counters by source, offline message-insight cards, and bounded approximate heavy hitters for unknown fingerprints. Recognized cards explain common messages and correlate only data already present in the snapshot; they are not findings and do not use an LLM, network, or external API. Routine/observe cards stay in this machine-readable confidential file unless local correlation detects an unhealthy related Pod or another explicit problem; actionable/security cards without a duplicate finding enter the operator report. Original messages remain confidential; do not transfer this file outside the trusted environment without a separate redaction review.
 
 Kubernetes API audit logs are not collected, including Deckhouse-specific audit backends. They are not exposed through a portable read-only Kubernetes API, may contain sensitive request or response data, and can be very large. Adding them safely requires a separate explicit opt-in with deployment-specific paths/backends, strict byte and time limits, and dedicated redaction; their absence from the snapshot is therefore intentional rather than a coverage error.
 

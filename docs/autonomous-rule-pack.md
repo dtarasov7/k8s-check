@@ -1,6 +1,6 @@
 # Автономный rule pack kdiag
 
-Rule pack `2026.08.11` содержит 98 проверок и работает без сети, LLM и внешней базы знаний. После сборки все классификаторы, карточки правил, ссылки на первичные источники и synthetic self-test входят в `kdiag.pyz`.
+Rule pack `2026.08.12` содержит 98 проверок и работает без сети, LLM и внешней базы знаний. После сборки все классификаторы, карточки правил, ссылки на первичные источники и synthetic self-test входят в `kdiag.pyz`.
 
 ## Модель достоверности
 
@@ -35,14 +35,14 @@ Rule pack `2026.08.11` содержит 98 проверок и работает 
 - осторожная корреляция KESL с cgroup denial и отдельный ptrace alert без утверждения причинности/вредоносности;
 - kernel OOM и conntrack table full;
 - адаптированные Node Problem Detector `v0.8.25` signatures: KernelOops, TaskHung, netdevice, EXT4/XFS, Buffer I/O и hardware errors;
-- Service → EndpointSlice → ready endpoint/port, kube-dns Service/CoreDNS в `d8-kube-dns` или `kube-system`, Corefile plugins/forward targets и kubelet resolver/clusterDNS;
+- Service → EndpointSlice → ready endpoint/port; Deckhouse `d8-kube-dns`, прежний redirect-Service, ExternalName `kube-dns`, `node-local-dns` и vanilla kube-dns/CoreDNS; Corefile plugins/forward targets и kubelet resolver/clusterDNS;
 - Cilium kube-proxy replacement и сравнение Service ClusterIP с read-only service maps; отсутствие kube-proxy само по себе штатно;
 - API server readyz, ошибки чтения authentication config, aggregated APIService, Node Lease и control-plane Pod health;
-- stacked-etcd endpoint health/status, active alarms, Raft/revision lag, backend quota, fragmentation и member version drift через allowlisted read-only commands;
+- stacked-etcd endpoint health/status, active alarms, Raft/revision lag, backend quota, fragmentation и member version drift через allowlisted read-only commands; container-local etcdctl имеет приоритет над host fallback;
 - PVC/PV/StorageClass, VolumeAttachment, CSIDriver/CSINode и CiliumEndpoint/CiliumNode/policy status;
 - CRI RuntimeReady/NetworkReady, активный swap, отдельные runtime filesystems и Kubernetes version skew;
 - time synchronization, X.509 `notAfter` и целостность symlink ротации kubelet client certificate;
-- firing alerts, failed config reload и corruption counter из необязательного Prometheus API;
+- firing alerts, failed config reload и corruption counter из необязательного Prometheus API, включая HTTP Basic authentication без сохранения credentials в snapshot;
 - runtime, CNI, memory/OOM, certificate/API и conntrack/network correlations.
 
 Пороговые значения, не являющиеся протокольными состояниями: root filesystem — менее 10% свободных блоков, inode — менее 5%, certificate warning — 30 суток. PSI собирается как evidence, но отдельный универсальный PSI threshold намеренно не задан: Linux определяет смысл метрик, а допустимый уровень зависит от нагрузки и должен калиброваться внутри контура.

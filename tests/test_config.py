@@ -49,6 +49,37 @@ class ConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "collect_cgroup must be boolean"):
                 load_config(path)
 
+    def test_prometheus_basic_auth_requires_a_complete_safe_pair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "prometheus": {
+                            "url": "https://prometheus.example.test",
+                            "username": "operator",
+                            "password": "secret",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(path)
+        self.assertEqual("operator", config["prometheus"]["username"])
+        self.assertEqual("secret", config["prometheus"]["password"])
+
+        invalid_values = (
+            {"url": "https://prometheus.example.test", "username": "operator"},
+            {"url": "https://prometheus.example.test", "password": "secret"},
+            {"url": "https://prometheus.example.test", "username": "bad:name", "password": "secret"},
+        )
+        for value in invalid_values:
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                path.write_text(json.dumps({"prometheus": value}), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "prometheus"):
+                    load_config(path)
+
 
 if __name__ == "__main__":
     unittest.main()

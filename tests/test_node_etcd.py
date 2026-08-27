@@ -46,7 +46,10 @@ class EtcdCollectionTest(unittest.TestCase):
                     return result(argv, b'[{"Endpoint":"a","Status":{"leader":1}}]')
                 return result(argv, b'{"alarms":[]}')
 
-            with patch("kdiag.node.shutil.which", side_effect=lambda name: "/usr/bin/crictl" if name == "crictl" else None), patch(
+            with patch(
+                "kdiag.node.shutil.which",
+                side_effect=lambda name: "/usr/bin/crictl" if name == "crictl" else "/usr/bin/etcdctl" if name == "etcdctl" else None,
+            ), patch(
                 "kdiag.node.run_process", side_effect=fake_run
             ):
                 value = _etcd_snapshot(

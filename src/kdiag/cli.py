@@ -30,6 +30,11 @@ def _parser():
     snapshot.add_argument("--context", help="kubectl context")
     snapshot.add_argument("--skip-kubernetes", action="store_true", help="не опрашивать Kubernetes API")
     snapshot.add_argument("--prometheus-url", help="необязательный URL Prometheus")
+    snapshot.add_argument("--prometheus-username", help="имя для HTTP Basic authentication Prometheus")
+    snapshot.add_argument(
+        "--prometheus-password-file",
+        help="файл с паролем Prometheus; пароль не передаётся в аргументах процесса",
+    )
     snapshot.add_argument("--ssh-user", help="SSH user по умолчанию")
     snapshot.add_argument("--ssh-port", type=int, help="SSH port по умолчанию")
     snapshot.add_argument("--remote-python", help="абсолютный путь Python 3.8 на узлах")
@@ -108,6 +113,19 @@ def _snapshot_config(arguments):
         config["kubernetes"]["enabled"] = False
     if arguments.prometheus_url:
         config["prometheus"]["url"] = arguments.prometheus_url
+    if arguments.prometheus_username:
+        config["prometheus"]["username"] = arguments.prometheus_username
+    if arguments.prometheus_password_file:
+        password_path = Path(arguments.prometheus_password_file)
+        if not password_path.is_file():
+            raise ValueError("prometheus password file is not a regular file")
+        payload = password_path.read_bytes()
+        if len(payload) > 16 * 1024:
+            raise ValueError("prometheus password file exceeds 16384 bytes")
+        try:
+            config["prometheus"]["password"] = payload.decode("utf-8").rstrip("\r\n")
+        except UnicodeDecodeError as error:
+            raise ValueError("prometheus password file must be UTF-8") from error
     if arguments.ssh_user:
         config["ssh"]["user"] = arguments.ssh_user
     if arguments.ssh_port is not None:

@@ -457,7 +457,11 @@ CLASSIFICATION_LABELS = {
 INSIGHT_CATEGORY_LABELS = {
     "actionable": "ТРЕБУЕТ ВНИМАНИЯ",
     "security": "БЕЗОПАСНОСТЬ",
+    "routine": "СОПУТСТВУЮЩЕЕ СООБЩЕНИЕ",
+    "observe": "СОПУТСТВУЮЩЕЕ СООБЩЕНИЕ",
 }
+
+REPORT_INSIGHT_CATEGORIES = frozenset(("actionable", "security"))
 
 DECISION_STATE_LABELS = {
     "investigate": "проверить сейчас",
@@ -579,7 +583,10 @@ def _human_gap(value):
 def _report_message_insights(values):
     return [
         value for value in (values or [])
-        if value.get("category") in INSIGHT_CATEGORY_LABELS
+        if (
+            value.get("category") in REPORT_INSIGHT_CATEGORIES
+            or value.get("decision_state") == "investigate"
+        )
         and value.get("insight_id") not in FINDING_BACKED_INSIGHTS
     ]
 

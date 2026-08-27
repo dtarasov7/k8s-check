@@ -539,23 +539,37 @@ def _service_dns_findings(node_snapshots, kubernetes):
         )
 
     dns_namespaces = ("d8-kube-dns", "kube-system")
+    dns_service_names = ("d8-kube-dns", "d8-kube-dns-redirect", "d8-kube-dns-redisrect", "kube-dns")
     dns_services = [
         service
         for service in services
         if (service.get("metadata") or {}).get("namespace") in dns_namespaces
-        and (service.get("metadata") or {}).get("name") == "kube-dns"
+        and (service.get("metadata") or {}).get("name") in dns_service_names
     ]
+    backend_services = [
+        service
+        for service in dns_services
+        if (service.get("spec") or {}).get("type") != "ExternalName"
+        and (service.get("spec") or {}).get("clusterIP") not in (None, "", "None")
+    ]
+    backend_services.sort(
+        key=lambda service: (
+            dns_service_names.index((service.get("metadata") or {}).get("name")),
+            str((service.get("metadata") or {}).get("namespace") or ""),
+        )
+    )
     dns_problems = []
     dns_evidence = ["kubernetes.json.gz#sources.services", "kubernetes.json.gz#sources.endpoint_slices"]
-    if not dns_services:
-        dns_problems.append("kube-dns Service отсутствует в d8-kube-dns и kube-system")
+    if not backend_services:
+        dns_problems.append("DNS backend Service (d8-kube-dns или kube-dns) отсутствует в d8-kube-dns и kube-system")
     else:
-        dns_service = dns_services[0]
+        dns_service = backend_services[0]
         dns_namespace = (dns_service.get("metadata") or {}).get("namespace")
-        dns_key = (dns_namespace, "kube-dns")
+        dns_service_name = (dns_service.get("metadata") or {}).get("name")
+        dns_key = (dns_namespace, dns_service_name)
         dns_endpoints = [endpoint for _index, item in slices_by_service.get(dns_key, []) for endpoint in item.get("endpoints", []) or []]
         if not any(_ready_endpoint(endpoint) for endpoint in dns_endpoints):
-            dns_problems.append("{0}/kube-dns не имеет ready endpoints".format(dns_namespace))
+            dns_problems.append("{0}/{1} не имеет ready endpoints".format(dns_namespace, dns_service_name))
         service_ips = set(dns_service.get("spec", {}).get("clusterIPs") or [dns_service.get("spec", {}).get("clusterIP")])
         service_ips.discard(None)
         mismatches = []
@@ -579,14 +593,24 @@ def _service_dns_findings(node_snapshots, kubernetes):
             )
     if _source_collected(kubernetes, "pods"):
         dns_pods = []
+        node_local_dns_pods = []
         for pod in _kube_items(kubernetes, "pods"):
             metadata = pod.get("metadata", {}) or {}
             labels = metadata.get("labels", {}) or {}
-            if metadata.get("namespace") in dns_namespaces and (
-                labels.get("k8s-app") == "kube-dns"
-                or labels.get("app.kubernetes.io/name") == "coredns"
-                or str(metadata.get("name") or "").startswith("coredns-")
-            ):
+            if metadata.get("namespace") not in dns_namespaces:
+                continue
+            identity = " ".join(
+                str(value or "").lower()
+                for value in (
+                    metadata.get("name"),
+                    labels.get("app"),
+                    labels.get("k8s-app"),
+                    labels.get("app.kubernetes.io/name"),
+                )
+            )
+            if "node-local-dns" in identity:
+                node_local_dns_pods.append(pod)
+            elif "coredns" in identity or "kube-dns" in identity or "d8-kube-dns" in identity:
                 dns_pods.append(pod)
         if not dns_pods:
             dns_problems.append("CoreDNS Pods отсутствуют")
@@ -597,6 +621,13 @@ def _service_dns_findings(node_snapshots, kubernetes):
             for pod in dns_pods
         ):
             dns_problems.append("нет Ready CoreDNS Pod")
+        if node_local_dns_pods and not any(
+            pod.get("status", {}).get("phase") == "Running"
+            and bool(pod.get("status", {}).get("containerStatuses"))
+            and all(status.get("ready") is True for status in pod.get("status", {}).get("containerStatuses", []) or [])
+            for pod in node_local_dns_pods
+        ):
+            dns_problems.append("node-local-dns присутствует, но не имеет Ready Pod")
         dns_evidence.append("kubernetes.json.gz#sources.pods")
     if dns_problems:
         findings.append(
@@ -605,7 +636,7 @@ def _service_dns_findings(node_snapshots, kubernetes):
                 "critical",
                 "Cluster DNS structural health нарушен",
                 "; ".join(dns_problems),
-                [_object_target(dns_services[0]) if dns_services else "cluster-dns"],
+                [_object_target(backend_services[0]) if backend_services else "cluster-dns"],
                 dns_evidence,
                 "Проверить CoreDNS Pods/logs, kube-dns Service/EndpointSlice и затем resolv.conf Pod; active test Pod не создаётся автоматически.",
                 causal_confidence="high",
@@ -1002,11 +1033,19 @@ def _cilium_dns_dataplane_findings(node_snapshots, kubernetes, normalized):
     if coredns_events:
         severity = "critical" if any("dns_forward_loop" in event.get("categories", []) for event in coredns_events) else "warning"
         findings.append(_event_finding("dns.coredns_errors", severity, "CoreDNS сообщает об ошибках resolution/forwarding", _coredns_error_summary(coredns_events), coredns_events, "Проверить имена запросов на опечатки и несуществующие zones, затем CoreDNS forward targets, loop plugin, upstream reachability и resolver узлов.", confidence="high", classification="fact"))
-    coredns_config = kubernetes.get("sources", {}).get("coredns_config", {})
-    if coredns_config.get("status") == "collected" and not coredns_config.get("data", {}).get("corefilePresent"):
-        metadata = coredns_config.get("data", {}).get("metadata", {}) or {}
-        target = "{0}/{1}".format(metadata.get("namespace") or "unknown", metadata.get("name") or "coredns")
-        findings.append(_finding("dns.coredns_config_empty", "critical", "CoreDNS ConfigMap не содержит Corefile", "ConfigMap {0} доступен, но Corefile отсутствует или пуст.".format(target), [target], ["kubernetes.json.gz#sources.coredns_config"], "Восстановить утверждённый Corefile по change procedure; kdiag конфигурацию не изменяет.", causal_confidence="high", classification="fact"))
+    empty_dns_configs = []
+    empty_dns_evidence = []
+    for source_id in ("coredns_config", "node_local_dns_config"):
+        dns_config = kubernetes.get("sources", {}).get(source_id, {})
+        if dns_config.get("status") != "collected" or dns_config.get("data", {}).get("corefilePresent"):
+            continue
+        metadata = dns_config.get("data", {}).get("metadata", {}) or {}
+        empty_dns_configs.append(
+            "{0}/{1}".format(metadata.get("namespace") or "unknown", metadata.get("name") or source_id)
+        )
+        empty_dns_evidence.append("kubernetes.json.gz#sources.{0}".format(source_id))
+    if empty_dns_configs:
+        findings.append(_finding("dns.coredns_config_empty", "critical", "DNS ConfigMap не содержит Corefile", "ConfigMap без непустого Corefile: {0}.".format(", ".join(empty_dns_configs)), empty_dns_configs, empty_dns_evidence, "Восстановить утверждённый Corefile по change procedure; kdiag конфигурацию не изменяет.", causal_confidence="high", classification="fact"))
 
     pods = _kube_items(kubernetes, "pods")
     kube_proxy_present = any(
@@ -2243,7 +2282,8 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
         findings.append(_event_finding("storage.volume_operation_failure", "warning", "Kubernetes сообщает об ошибках mount/attach volume", "Найдено событий: {0}.".format(len(volume_events)), volume_events, "Сопоставить Pod, PVC/PV, VolumeAttachment и CSI node/controller logs.", confidence="high", classification="fact"))
 
     auth_config_events = _events(normalized, "authentication_config_read_error")
-    if auth_config_events:
+    auth_config_occurrences = sum(int(event.get("occurrence_count") or 1) for event in auth_config_events)
+    if auth_config_occurrences > 1:
         context = _authentication_config_context(node_snapshots, kubernetes, auth_config_events)
         recommendation = (
             "Текущее отсутствие файла не подтверждено. Если после последней записи ошибка не повторяется, readyz и Pod остаются исправны, действие не требуется. "
@@ -2255,9 +2295,7 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
             "controlplane.authentication_config_read_error",
             "info" if context["current_healthy"] else "warning",
             "В журнале kube-apiserver была ошибка чтения authentication config",
-            "Обнаружено записей: {0}. Они доказывают ошибку чтения в момент записи, но не доказывают, что файл отсутствует сейчас или API server недоступен.".format(
-                sum(int(event.get("occurrence_count") or 1) for event in auth_config_events)
-            ),
+            "Обнаружено повторяющихся записей: {0}. Они доказывают ошибку чтения в моменты записей, но не доказывают, что файл отсутствует сейчас или API server недоступен.".format(auth_config_occurrences),
             auth_config_events,
             recommendation,
             confidence="none",

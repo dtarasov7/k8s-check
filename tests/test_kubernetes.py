@@ -1,8 +1,10 @@
+import base64
 import json
 import unittest
 from unittest.mock import patch
 
 from kdiag.kubernetes import (
+    CONFIGMAP_CANDIDATES,
     KubectlCollector,
     _pod_log_priority,
     project_api_service,
@@ -17,6 +19,7 @@ from kdiag.kubernetes import (
     project_storage_class,
     project_volume_attachment,
     project_workload,
+    collect_prometheus,
     snapshot_status,
 )
 from kdiag.runner import ProcessResult
@@ -59,6 +62,15 @@ class KubernetesProjectionTest(unittest.TestCase):
         projected = project_service({"kind": "Service", "metadata": {}, "spec": {"selector": {"secret": "SECRET"}}})
         self.assertEqual({}, projected["spec"]["selector"])
         self.assertTrue(projected["spec"]["selectorPresent"])
+
+        external = project_service(
+            {
+                "kind": "Service",
+                "metadata": {"namespace": "d8-kube-dns", "name": "kube-dns"},
+                "spec": {"type": "ExternalName", "externalName": "d8-kube-dns.d8-kube-dns.svc.cluster.local"},
+            }
+        )
+        self.assertEqual("d8-kube-dns.d8-kube-dns.svc.cluster.local", external["spec"]["externalName"])
 
     def test_event_series_timestamp_and_count_are_preserved(self):
         projected = project_event(
@@ -193,6 +205,42 @@ class KubernetesProjectionTest(unittest.TestCase):
         self.assertEqual("kube-system/coredns", result["discovered_at"])
         self.assertEqual(["failed", "collected"], [item["status"] for item in result["attempts"]])
         self.assertEqual(["d8-kube-dns", "kube-system"], [argv[argv.index("--namespace") + 1] for argv in calls])
+
+    def test_deckhouse_configmap_names_precede_legacy_and_vanilla_names(self):
+        self.assertEqual(("d8-kube-dns", "d8-kube-dns"), CONFIGMAP_CANDIDATES["coredns_config"][0])
+        self.assertIn(("d8-kube-dns", "node-local-dns"), CONFIGMAP_CANDIDATES["node_local_dns_config"])
+        self.assertEqual(("d8-cni-cilium", "cilium-configmap"), CONFIGMAP_CANDIDATES["cilium_config"][0])
+
+    def test_prometheus_basic_auth_header_is_used_but_not_saved(self):
+        requests = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _kind, _value, _traceback):
+                return False
+
+            def read(self, _limit):
+                return b'{"status":"success","data":{"alerts":[]}}'
+
+        class Opener:
+            def open(self, request, timeout):
+                requests.append((request, timeout))
+                return Response()
+
+        with patch("kdiag.kubernetes.urllib.request.build_opener", return_value=Opener()):
+            snapshot = collect_prometheus(
+                "https://prometheus.example.test",
+                3,
+                1024,
+                username="operator",
+                password="secret",
+            )
+        expected = "Basic " + base64.b64encode(b"operator:secret").decode("ascii")
+        self.assertEqual(2, len(requests))
+        self.assertTrue(all(request.get_header("Authorization") == expected for request, _timeout in requests))
+        self.assertNotIn("secret", json.dumps(snapshot))
 
 
 if __name__ == "__main__":

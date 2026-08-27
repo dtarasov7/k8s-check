@@ -1,5 +1,7 @@
 import io
+import tempfile
 import unittest
+from pathlib import Path
 
 from kdiag.cli import _parser, _progress_callback, _snapshot_config
 from kdiag.orchestrator import _node_arguments
@@ -28,6 +30,27 @@ class CLIProgressTest(unittest.TestCase):
         detail = _progress_callback("detail", stream=detail_output)
         detail("detail", "source status")
         self.assertEqual("[kdiag] source status\n", detail_output.getvalue())
+
+    def test_prometheus_password_is_read_from_file_not_command_line(self):
+        with tempfile.TemporaryDirectory() as directory:
+            password_file = Path(directory) / "prometheus-password"
+            password_file.write_text("secret-from-file\n", encoding="utf-8")
+            arguments = _parser().parse_args(
+                [
+                    "snapshot",
+                    "--inventory",
+                    "inventory.ini",
+                    "--prometheus-url",
+                    "https://prometheus.example.test",
+                    "--prometheus-username",
+                    "operator",
+                    "--prometheus-password-file",
+                    str(password_file),
+                ]
+            )
+            config = _snapshot_config(arguments)
+        self.assertEqual("operator", config["prometheus"]["username"])
+        self.assertEqual("secret-from-file", config["prometheus"]["password"])
 
 
 if __name__ == "__main__":

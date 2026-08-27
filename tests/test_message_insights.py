@@ -26,6 +26,58 @@ class MessageInsightsTest(unittest.TestCase):
         )
         self.assertEqual("observe", compatibility["category"])
 
+        routine_messages = (
+            (
+                "kubelet",
+                'Container image "registry/image@sha256:abc" already present and unpacked successfully on machine',
+            ),
+            (
+                "statefulset-controller",
+                "create Pod smoke-mini-a-0 in StatefulSet smoke-mini-a successful",
+            ),
+            (
+                "cert-manager-certificaterequests-issuer-ca",
+                "certificate fetched from issuer successfully",
+            ),
+            (
+                "kube-rbac-proxy",
+                "added upstream: path=/metrics, upstream=http://127.0.0.1:8080/metrics",
+            ),
+        )
+        for component, message in routine_messages:
+            with self.subTest(component=component, message=message):
+                insight = match_message_insight(component, message)
+                self.assertIsNotNone(insight)
+                self.assertEqual("routine", insight["category"])
+
+        expected_messages = (
+            (
+                "cert-manager-certificaterequests-issuer-acme",
+                "not signing CertificateRequest until it is approved",
+                "observe",
+            ),
+            (
+                "cert-manager-certificates-trigger",
+                "issuing certificate as Secret does not exist",
+                "observe",
+            ),
+            (
+                "control-plane-manager",
+                '"msg":"kubernetes pod checksum does not match expected checksum"',
+                "actionable",
+            ),
+            (
+                "kubelet",
+                "failed to garbage collect required amount of images, attempted to free 100 bytes",
+                "actionable",
+            ),
+        )
+        for component, message, category in expected_messages:
+            with self.subTest(component=component, message=message):
+                insight = match_message_insight(component, message)
+                self.assertIsNotNone(insight)
+                self.assertEqual(category, insight["category"])
+
     def test_security_catalog_also_enriches_a_categorized_event(self):
         message = 'ptrace attack of "/opt/target" was attempted by "/opt/kaspersky/kesl"'
         normalized = normalize_evidence(

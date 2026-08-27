@@ -6,6 +6,24 @@
 
 ## [Не выпущено]
 
+## [0.9.0] - 2026-08-27
+
+### Добавлено
+
+- Сбор Prometheus поддерживает HTTP Basic authentication через `prometheus.username` и `prometheus.password`. В CLI пароль передаётся через `--prometheus-password-file`, поэтому не попадает в командную строку процесса; учётные данные не записываются в collection.
+- Если `cilium`, `cilium-dbg` или `cilium-debug` отсутствует на узле, состояние Cilium и service map собираются через `crictl exec` в уже работающем контейнере `cilium-agent`.
+
+### Изменено
+
+- Discovery Deckhouse учитывает ConfigMap `d8-kube-dns` и `node-local-dns`, backend Service `d8-kube-dns`, прежние redirect-Service, ExternalName alias `kube-dns`, имена DNS Pod Deckhouse и ConfigMap `d8-cni-cilium/cilium-configmap`; vanilla и прежние имена сохранены как fallback.
+- Read-only проверка stacked etcd сначала запускает `etcdctl` внутри работающего контейнера etcd и только затем использует host binary как fallback.
+- Из операторского отчёта скрыты известные успешные сообщения kubelet, StatefulSet, cert-manager, kube-rbac-proxy и DNS cleaner. Штатное сообщение выводится только тогда, когда автономное сопоставление нашло нездоровый связанный Pod или другой явный признак проблемы.
+- Одиночная ошибка чтения Deckhouse authentication config считается нормальной гонкой reconciliation и не создаёт finding. В отчёт попадают только повторные записи с проверкой текущих метаданных файла, API readyz и готовности kube-apiserver.
+
+### Исправлено
+
+- Для несовпадения checksum control-plane Pod и недостаточного освобождения образов kubelet добавлены понятные автономные объяснения и условия решения вместо необъяснённых unknown fingerprints.
+
 ## [0.8.1] - 2026-08-27
 
 ### Изменено

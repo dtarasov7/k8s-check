@@ -65,7 +65,9 @@ kubectl --kubeconfig /path/to/kdiag-readonly.kubeconfig auth can-i get secrets -
 - неинтерактивный `sudo -n` до root для текущей SSH-учётки;
 - штатные системные утилиты. Фиксированный безопасный `PATH` сначала проверяет `/opt/deckhouse/bin`, затем стандартные системные каталоги. Отсутствующая утилита отображается как недоступная команда со статусом `unsupported`; это не означает отсутствие одноимённой подсистемы ядра или файла данных.
 
-На control-plane узлах `collect_etcd=true` использует host `etcdctl` либо `crictl exec` в уже работающий static Pod etcd. Выполняются только `endpoint status`, `endpoint health` и `alarm list` со стандартными kubeadm healthcheck TLS paths. Содержимое private key не читается и не попадает в bundle. Для external/non-kubeadm etcd источник будет `not_applicable` или `unavailable`.
+На control-plane узлах `collect_etcd=true` сначала запускает `etcdctl` через `crictl exec` в уже работающем static Pod etcd и только затем использует host `etcdctl` как fallback. Выполняются только `endpoint status`, `endpoint health` и `alarm list` со стандартными kubeadm healthcheck TLS paths. Содержимое private key не читается и не попадает в bundle. Для external/non-kubeadm etcd источник будет `not_applicable` или `unavailable`.
+
+Если Cilium CLI отсутствует на host, kdiag может выполнить те же read-only команды status/service list через `crictl exec` в работающем контейнере `cilium-agent`. Kubernetes `pods/exec` не используется.
 
 Текущая широкая возможность `sudo` делает SSH-учётку высокопривилегированной независимо от `kdiag`. Для постоянной эксплуатации рекомендуется root-owned wrapper/узкий `sudoers`; первый аварийный вариант использует уже разрешённую модель доступа.
 
@@ -80,7 +82,7 @@ python3.8 dist/kdiag.pyz --version
 
 ## Конфигурация
 
-Скопируйте [пример конфигурации](config/snapshot.example.json) и укажите отдельный kubeconfig. Не добавляйте в JSON пароли, SSH private key или Kubernetes tokens; конфигурация хранит только пути.
+Скопируйте [пример конфигурации](config/snapshot.example.json) и укажите отдельный kubeconfig. Не добавляйте SSH private key или Kubernetes tokens. Единственный поддерживаемый секрет конфигурации — необязательный пароль Prometheus Basic Auth; файл с ним должен иметь режим `0600`. В CLI используйте `--prometheus-password-file`, чтобы пароль не попадал в командную строку процесса.
 
 Безопасный default для прикладных namespace — пустой список. Namespace можно разрешить в JSON или повторяемым параметром `--application-namespace`.
 
@@ -107,6 +109,7 @@ python3.8 dist/kdiag.pyz snapshot \
 - `--skip-cgroup` — не собирать прямые cgroup facts и не создавать cgroup events/findings;
 - `--skip-kubernetes` — собрать только node evidence;
 - `--prometheus-url URL` — best-effort Prometheus evidence;
+- `--prometheus-username USER` и `--prometheus-password-file FILE` — необязательная HTTP Basic authentication Prometheus;
 - `--application-namespace NAME` — явно разрешить логи namespace.
 
 `ansible_ssh_common_args` и `ansible_ssh_extra_args` намеренно не исполняются. Для ProxyJump или сложного inventory сначала создайте проверенный OpenSSH alias и используйте его как `ansible_host`.
@@ -157,7 +160,7 @@ python3.8 dist/kdiag.pyz rules list
 python3.8 dist/kdiag.pyz rules explain kubernetes.node_not_ready
 ```
 
-`normalized-events.json.gz` содержит дедуплицированные распознанные события, независимые эпизоды совпадений по времени, счётчики усечения, автономные карточки известных сообщений и ограниченный список частых нераспознанных шаблонов. Карточки используют только уже собранные данные; LLM, сеть и внешние API не нужны. Штатные сообщения и сообщения для наблюдения остаются только в этом конфиденциальном машинном файле; в основной отчёт попадают лишь требующие внимания сообщения, для которых нет отдельной карточки проблемы. Передавать файл за пределы контура без обезличивания нельзя.
+`normalized-events.json.gz` содержит дедуплицированные распознанные события, независимые эпизоды совпадений по времени, счётчики усечения, автономные карточки известных сообщений и ограниченный список частых нераспознанных шаблонов. Карточки используют только уже собранные данные; LLM, сеть и внешние API не нужны. Штатные сообщения и сообщения для наблюдения остаются только в этом конфиденциальном машинном файле, кроме случаев, когда локальное сопоставление обнаружило нездоровый связанный Pod или другой явный признак проблемы; в основной отчёт попадают требующие внимания сообщения, для которых нет отдельной карточки проблемы. Передавать файл за пределы контура без обезличивания нельзя.
 
 Kubernetes API audit logs, включая Deckhouse-specific audit backends, не собираются. Они не доступны через единый переносимый read-only Kubernetes API, могут содержать чувствительные request/response data и иметь большой объём. Безопасное добавление требует отдельного opt-in, зависящих от deployment путей/backends, жёстких лимитов по времени и объёму, а также отдельной редакции; поэтому их отсутствие в snapshot намеренно и не считается coverage error.
 

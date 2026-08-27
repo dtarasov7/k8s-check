@@ -48,6 +48,8 @@ DEFAULT_CONFIG = {
     },
     "prometheus": {
         "url": None,
+        "username": None,
+        "password": None,
         "timeout_seconds": 3,
         "max_response_bytes": 1 * MIB,
     },
@@ -121,6 +123,26 @@ def validate_config(config):
         config["kubernetes"][list_key] = sorted(set(require_k8s_name(item) for item in values))
     if config["ssh"]["user"] is not None and not isinstance(config["ssh"]["user"], str):
         raise ValueError("ssh.user must be a string or null")
+    for key in ("timeout_seconds", "max_response_bytes"):
+        _positive_int(config, "prometheus", key)
+    prometheus = config["prometheus"]
+    if prometheus["url"] is not None and not isinstance(prometheus["url"], str):
+        raise ValueError("prometheus.url must be a string or null")
+    username = prometheus.get("username")
+    password = prometheus.get("password")
+    if (username is None) != (password is None):
+        raise ValueError("prometheus.username and prometheus.password must be specified together")
+    if username is not None:
+        if not isinstance(username, str) or not username or len(username) > 1024:
+            raise ValueError("prometheus.username must be a non-empty string up to 1024 characters")
+        if ":" in username or any(ord(character) < 32 or ord(character) == 127 for character in username):
+            raise ValueError("prometheus.username contains characters unsafe for HTTP Basic authentication")
+        if not isinstance(password, str) or len(password) > 16384:
+            raise ValueError("prometheus.password must be a string up to 16384 characters")
+        if any(ord(character) < 32 and character not in ("\t",) for character in password):
+            raise ValueError("prometheus.password contains control characters")
+        if not prometheus.get("url"):
+            raise ValueError("prometheus.url is required when credentials are configured")
     return config
 
 

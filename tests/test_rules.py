@@ -136,7 +136,7 @@ class RulesTest(unittest.TestCase):
         rule_ids = {item["rule_id"] for item in evaluate_rules(collection, {"node-1": snapshot}, kubernetes)}
         self.assertNotIn("inventory.node_set_mismatch", rule_ids)
 
-    def test_controlplane_auth_config_and_ptrace_alerts_are_findings(self):
+    def test_repeated_controlplane_auth_config_and_ptrace_alerts_are_findings(self):
         normalized = {
             "events": [
                 {
@@ -147,6 +147,7 @@ class RulesTest(unittest.TestCase):
                     "evidence": "kubernetes.json.gz#logs.entries[0]",
                     "message_excerpt": "Failed to read authentication config file: no such file or directory",
                     "timestamp": "2026-01-01T00:00:00Z",
+                    "occurrence_count": 2,
                 },
                 {
                     "event_id": "ptrace",
@@ -200,10 +201,27 @@ class RulesTest(unittest.TestCase):
         self.assertIn("controlplane.authentication_config_read_error", rule_ids)
         self.assertIn("security_agent.ptrace_alert", rule_ids)
         auth = next(item for item in findings if item["rule_id"] == "controlplane.authentication_config_read_error")
-        self.assertIn("в момент записи", auth["summary"])
+        self.assertIn("в моменты записей", auth["summary"])
         self.assertTrue(any("существует сейчас" in value for value in auth["counter_evidence"]))
         self.assertTrue(any("readyz" in value for value in auth["counter_evidence"]))
         self.assertIn("не подтверждено", auth["recommendation"])
+
+    def test_one_off_auth_config_race_is_not_reported(self):
+        normalized = {
+            "events": [
+                {
+                    "event_id": "auth",
+                    "categories": ["authentication_config_read_error"],
+                    "source": "kubernetes_pod_log",
+                    "component": "kube-apiserver",
+                    "message_excerpt": "Failed to read authentication config file: no such file or directory",
+                    "occurrence_count": 1,
+                }
+            ],
+            "correlations": [],
+        }
+        rule_ids = {item["rule_id"] for item in evaluate_rules({"nodes": []}, {}, {}, normalized)}
+        self.assertNotIn("controlplane.authentication_config_read_error", rule_ids)
 
     def test_runtime_service_detection_supports_deckhouse_and_ignores_not_found(self):
         snapshot = node_snapshot("6.1")
@@ -451,6 +469,91 @@ class RulesTest(unittest.TestCase):
         }
         finding = next(item for item in evaluate_rules({"nodes": []}, {}, kubernetes) if item["rule_id"] == "dns.kube_dns_unavailable")
         self.assertIn("нет Ready CoreDNS Pod", finding["summary"])
+
+    def test_deckhouse_dns_backend_and_external_alias_are_healthy(self):
+        kubernetes = {
+            "sources": {
+                "services": {
+                    "status": "collected",
+                    "data": {
+                        "items": [
+                            {
+                                "metadata": {"namespace": "d8-kube-dns", "name": "d8-kube-dns"},
+                                "spec": {
+                                    "type": "ClusterIP",
+                                    "clusterIP": "10.0.0.10",
+                                    "clusterIPs": ["10.0.0.10"],
+                                    "selectorPresent": True,
+                                    "ports": [{"name": "dns", "port": 53}],
+                                },
+                            },
+                            {
+                                "metadata": {"namespace": "d8-kube-dns", "name": "kube-dns"},
+                                "spec": {
+                                    "type": "ExternalName",
+                                    "externalName": "d8-kube-dns.d8-kube-dns.svc.cluster.local",
+                                    "selectorPresent": False,
+                                    "ports": [],
+                                },
+                            },
+                        ]
+                    },
+                },
+                "endpoint_slices": {
+                    "status": "collected",
+                    "data": {
+                        "items": [
+                            {
+                                "metadata": {
+                                    "namespace": "d8-kube-dns",
+                                    "labels": {"kubernetes.io/service-name": "d8-kube-dns"},
+                                },
+                                "endpoints": [{"conditions": {"ready": True}}],
+                                "ports": [{"name": "dns", "port": 53}],
+                            }
+                        ]
+                    },
+                },
+                "pods": {
+                    "status": "collected",
+                    "data": {
+                        "items": [
+                            {
+                                "metadata": {
+                                    "namespace": "d8-kube-dns",
+                                    "name": "d8-kube-dns-a",
+                                    "labels": {"app": "d8-kube-dns"},
+                                },
+                                "status": {
+                                    "phase": "Running",
+                                    "containerStatuses": [{"name": "coredns", "ready": True}],
+                                },
+                            },
+                            {
+                                "metadata": {
+                                    "namespace": "d8-kube-dns",
+                                    "name": "node-local-dns-a",
+                                    "labels": {"app": "node-local-dns"},
+                                },
+                                "status": {
+                                    "phase": "Running",
+                                    "containerStatuses": [{"name": "coredns", "ready": True}],
+                                },
+                            },
+                        ]
+                    },
+                },
+            }
+        }
+        nodes = {
+            "node-1": {
+                "facts": {"kubelet_config": {"values": {"clusterDNS": ["10.0.0.10"]}}},
+                "commands": [],
+            }
+        }
+        rule_ids = {item["rule_id"] for item in evaluate_rules({"nodes": []}, nodes, kubernetes)}
+        self.assertNotIn("dns.kube_dns_unavailable", rule_ids)
+        self.assertNotIn("dns.cluster_dns_mismatch", rule_ids)
 
     def test_selector_present_survives_allowlist_projection(self):
         kubernetes = {

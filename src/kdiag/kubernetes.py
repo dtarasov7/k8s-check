@@ -1,3 +1,4 @@
+import base64
 import json
 import re
 import ssl
@@ -48,12 +49,18 @@ ALLOWED_CILIUM_CONFIG_KEYS = (
 
 CONFIGMAP_CANDIDATES = {
     "cilium_config": (
+        ("d8-cni-cilium", "cilium-configmap"),
         ("d8-cni-cilium", "cilium-config"),
         ("kube-system", "cilium-config"),
     ),
     "coredns_config": (
+        ("d8-kube-dns", "d8-kube-dns"),
         ("d8-kube-dns", "coredns"),
         ("kube-system", "coredns"),
+    ),
+    "node_local_dns_config": (
+        ("d8-kube-dns", "node-local-dns"),
+        ("kube-system", "node-local-dns"),
     ),
 }
 
@@ -457,6 +464,7 @@ def project_service(item):
         "metadata": _metadata(item.get("metadata"), ALLOWED_POD_LABELS),
         "spec": {
             "type": spec.get("type"),
+            "externalName": spec.get("externalName"),
             "clusterIP": spec.get("clusterIP"),
             "clusterIPs": spec.get("clusterIPs"),
             "ipFamilies": spec.get("ipFamilies"),
@@ -951,6 +959,14 @@ class KubectlCollector:
                 False,
             )
             futures[coredns_config_future] = ("coredns_config", False)
+            node_local_dns_config_future = executor.submit(
+                self._first_json_source,
+                "node_local_dns_config",
+                CONFIGMAP_CANDIDATES["node_local_dns_config"],
+                project_coredns_config,
+                False,
+            )
+            futures[node_local_dns_config_future] = ("node_local_dns_config", False)
             for future in as_completed(futures):
                 source_id, required = futures[future]
                 try:
@@ -1045,17 +1061,28 @@ class KubectlCollector:
         return {"status": status, "entries": entries, "bytes": consumed, "selected_pods": len(selected)}
 
 
-def collect_prometheus(url, timeout_seconds, max_response_bytes):
+def collect_prometheus(url, timeout_seconds, max_response_bytes, username=None, password=None):
     if not url:
         return {"kind": "prometheus_snapshot", "status": "not_configured", "sources": {}}
+    if (username is None) != (password is None):
+        return {
+            "kind": "prometheus_snapshot",
+            "status": "invalid_auth",
+            "sources": {},
+            "error": "Prometheus username and password must be specified together",
+        }
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password:
         return {"kind": "prometheus_snapshot", "status": "invalid_url", "sources": {}, "error": "only http/https URL is accepted"}
     base = url.rstrip("/")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+    headers = {"Accept": "application/json", "User-Agent": "kdiag/0.1"}
+    if username is not None and password is not None:
+        token = base64.b64encode("{0}:{1}".format(username, password).encode("utf-8")).decode("ascii")
+        headers["Authorization"] = "Basic {0}".format(token)
     sources = {}
     for source_id, path in (("alerts", "/api/v1/alerts"), ("runtimeinfo", "/api/v1/status/runtimeinfo")):
-        request = urllib.request.Request(base + path, method="GET", headers={"Accept": "application/json", "User-Agent": "kdiag/0.1"})
+        request = urllib.request.Request(base + path, method="GET", headers=headers)
         try:
             with opener.open(request, timeout=timeout_seconds) as response:
                 payload = response.read(max_response_bytes + 1)

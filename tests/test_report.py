@@ -40,6 +40,19 @@ class ReportTest(unittest.TestCase):
                     "title": "Конфигурация Nginx не изменилась",
                 },
                 {
+                    "insight_id": "routine-correlated",
+                    "category": "routine",
+                    "title": "Успех рядом с деградацией",
+                    "component": "demo",
+                    "template": "successful",
+                    "decision_state": "investigate",
+                    "occurrence_range": {"minimum": 10, "maximum": 10},
+                    "checks": [{"name": "component_pod_state", "status": "problem", "summary": "Pod не готов"}],
+                    "explanation": "Сообщение штатное, но связанный Pod не готов.",
+                    "decision_condition": "Проверять только при деградации Pod.",
+                    "recommendation": "Проверить Pod.",
+                },
+                {
                     "insight_id": "demo",
                     "category": "actionable",
                     "title": "Проверка <n>",
@@ -64,6 +77,7 @@ class ReportTest(unittest.TestCase):
         rendered = "\n".join(lines)
         self.assertIn("Сообщения, требующие внимания", rendered)
         self.assertNotIn("Конфигурация Nginx не изменилась", rendered)
+        self.assertIn("Успех рядом с деградацией", rendered)
         self.assertIn("гарантированно не менее 3, оценочная верхняя граница 4", rendered)
         self.assertIn("Что говорит против текущей проблемы: readyz healthy", rendered)
         self.assertIn("Когда требуется действие: Решить при повторении", rendered)

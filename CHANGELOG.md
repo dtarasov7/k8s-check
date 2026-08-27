@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-27
+
+### Added
+
+- Prometheus collection now supports HTTP Basic authentication through `prometheus.username` and `prometheus.password`. CLI users can pass the password through `--prometheus-password-file`, so the secret does not appear in the process command line; credentials are never written to collection artifacts.
+- Cilium status and service-map collection falls back to `crictl exec` in the already running `cilium-agent` container when `cilium`, `cilium-dbg`, or `cilium-debug` is unavailable on the host.
+
+### Changed
+
+- Deckhouse discovery recognizes the `d8-kube-dns` and `node-local-dns` ConfigMaps, the `d8-kube-dns` backend and legacy redirect Services, the `kube-dns` ExternalName alias, Deckhouse DNS Pod names, and the `d8-cni-cilium/cilium-configmap` name while retaining vanilla and legacy fallbacks.
+- Stacked etcd inspection now prefers `etcdctl` inside the running etcd container and uses a host binary only as a fallback.
+- Known successful kubelet, StatefulSet, cert-manager, kube-rbac-proxy, and DNS-cleaner messages are hidden from the operator report. A routine message is shown only when offline correlation finds an unhealthy related Pod or another explicit problem.
+- A single Deckhouse authentication-config read error is treated as a normal reconciliation race and omitted from findings. Only repeated records are reported and correlated with current file metadata, API readyz, and kube-apiserver readiness.
+
+### Fixed
+
+- Added actionable offline explanations for control-plane checksum mismatch and insufficient kubelet image garbage collection instead of leaving them as unexplained unknown fingerprints.
+
 ## [0.8.1] - 2026-08-27
 
 ### Changed

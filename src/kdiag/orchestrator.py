@@ -195,6 +195,8 @@ def run_snapshot(inventory_path, group, output_root, config, progress=None):
         config["prometheus"].get("url"),
         config["prometheus"]["timeout_seconds"],
         config["prometheus"]["max_response_bytes"],
+        username=config["prometheus"].get("username"),
+        password=config["prometheus"].get("password"),
     )
     prometheus_path = collection_dir / "prometheus.json.gz"
     atomic_write_gzip_json(prometheus_path, prometheus_snapshot)

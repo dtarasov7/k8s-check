@@ -1,4 +1,4 @@
-RULE_PACK_VERSION = "2026.08.11"
+RULE_PACK_VERSION = "2026.08.12"
 
 
 SOURCES = {
@@ -83,7 +83,7 @@ RULE_CATALOG = {
     "dns.kube_dns_unavailable": _entry("Cluster DNS недоступен", "fact", ("k8s_dns",), "kube-dns Service, ready endpoints или CoreDNS Pods отсутствуют/нездоровы."),
     "dns.cluster_dns_mismatch": _entry("kubelet clusterDNS не совпадает с Service", "fact", ("k8s_dns",), "Явный clusterDNS kubelet отличается от ClusterIP kube-dns Service."),
     "controlplane.api_readyz_failed": _entry("API server readyz failed", "fact", ("k8s_api_health",), "Raw /readyz или одна из его проверок завершилась ошибкой."),
-    "controlplane.authentication_config_read_error": _entry("В журнале API server была ошибка чтения authentication config", "fact", ("k8s_auth_config",), "Запись подтверждает ошибку чтения в конкретный момент, но не доказывает текущее отсутствие файла или недоступность API server. Текущее состояние проверяется отдельно."),
+    "controlplane.authentication_config_read_error": _entry("API server повторно не прочитал authentication config", "fact", ("k8s_auth_config",), "Повторные записи подтверждают ошибки чтения в конкретные моменты; одиночная гонка при Deckhouse reconciliation не выводится. Текущее наличие host-файла, readyz и Pod readiness проверяются отдельно."),
     "controlplane.apiservice_unavailable": _entry("Aggregated APIService недоступен", "fact", ("k8s_apiservice",), "APIService condition Available имеет False или Unknown."),
     "controlplane.node_lease_stale": _entry("Node Lease отсутствует или отстаёт", "correlation", ("k8s_leases", "k8s_nodes"), "Node Lease отсутствует либо существенно отстаёт от свежей peer Lease."),
     "controlplane.static_pod_unhealthy": _entry("Control-plane static Pod нездоров", "fact", ("k8s_api_health", "k8s_debug_pods"), "etcd/apiserver/scheduler/controller-manager Pod не Running или container не Ready."),

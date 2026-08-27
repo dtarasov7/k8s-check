@@ -2,7 +2,7 @@
 
 ## 1. Purpose and scope
 
-<code>kdiag 0.8.1</code> creates a one-time emergency snapshot of a Kubernetes cluster and performs deterministic, fully offline analysis. Its current diagnostic compatibility scope is vanilla Kubernetes and Deckhouse CSE Pro 1.74 with Kubernetes 1.24–1.31, up to 20 nodes and about 1,000 Pods. This describes evidence/rule compatibility, not lifecycle support.
+<code>kdiag 0.9.0</code> creates a one-time emergency snapshot of a Kubernetes cluster and performs deterministic, fully offline analysis. Its current diagnostic compatibility scope is vanilla Kubernetes and Deckhouse CSE Pro 1.74 with Kubernetes 1.24–1.31, up to 20 nodes and about 1,000 Pods. This describes evidence/rule compatibility, not lifecycle support.
 
 The program runs on a separate management server. It connects to every node over SSH, runs read-only inspection through non-interactive sudo, and queries the Kubernetes API using a dedicated kubeconfig. Prometheus is optional: the snapshot still works when Prometheus or the entire Kubernetes API is unavailable.
 
@@ -86,7 +86,9 @@ Read-only stacked kubeadm etcd inspection is attempted only with these standard 
 /etc/kubernetes/pki/etcd/healthcheck-client.key
 ~~~
 
-The collector uses host etcdctl, or crictl to invoke etcdctl inside the already running local etcd container. External etcd and non-standard layouts produce an evidence-gap result rather than an invented diagnosis.
+The collector first uses crictl to invoke etcdctl inside the already running local etcd container, which matches Deckhouse static Pods, and falls back to host etcdctl for vanilla layouts. External etcd and non-standard layouts produce an evidence-gap result rather than an invented diagnosis.
+
+For Cilium, host `cilium`, `cilium-dbg`, and `cilium-debug` commands are tried first. If they are unavailable, the same bounded read-only status and service-list commands are run through crictl in a running `cilium-agent` container. Kubernetes `pods/exec` permission is not required.
 
 ## 5. Build, test, and offline transfer
 
@@ -119,7 +121,9 @@ Use a separate identity even if a super-admin is available for an initial contro
 
 Review every binding subject before applying the manifest. Do not add Secret access, pods/exec, or write verbs. Application namespace Roles are not generated automatically: create an equivalent namespaced Role and RoleBinding, bind it to <code>kdiag-system/kdiag-reader</code>, and add only the approved namespace to the configuration.
 
-The enabled collector reads Nodes, Pods, Events, workloads, Services, EndpointSlices, PDBs, PVCs, PVs, APIService, Leases, VolumeAttachments, CSI objects, StorageClasses, NetworkPolicies, selected Cilium CRDs, allowlisted fields from the <code>cilium-config</code> and <code>coredns</code> ConfigMaps, the non-resource URL <code>/readyz</code>, and Pod logs only in approved namespaces. ConfigMap discovery tries Deckhouse locations (`d8-cni-cilium`, `d8-kube-dns`) first and then vanilla `kube-system`, recording every attempt and the selected object.
+The enabled collector reads Nodes, Pods, Events, workloads, Services, EndpointSlices, PDBs, PVCs, PVs, APIService, Leases, VolumeAttachments, CSI objects, StorageClasses, NetworkPolicies, selected Cilium CRDs, allowlisted DNS/Cilium ConfigMap fields, the non-resource URL <code>/readyz</code>, and Pod logs only in approved namespaces. ConfigMap discovery recognizes Deckhouse `d8-cni-cilium/cilium-configmap`, `d8-kube-dns/d8-kube-dns`, and `d8-kube-dns/node-local-dns`, then tries legacy Deckhouse and vanilla `cilium-config`, `coredns`, and `node-local-dns` names while recording every attempt and selected object.
+
+Built-in DNS rules recognize the Deckhouse `d8-kube-dns` backend, legacy `d8-kube-dns-redirect` spelling variants, the `kube-dns` ExternalName alias, `node-local-dns`, and vanilla `kube-dns`/CoreDNS. Other audited platform differences include optional kube-proxy when Cilium replacement is used, `containerd-deckhouse.service`, and container-local etcd/Cilium CLIs. Generic resource checks remain name-independent.
 
 ### Creating a kubeconfig for kdiag-reader
 
@@ -258,6 +262,8 @@ Copy <code>config/snapshot.example.json</code> to an environment-specific file. 
 | Key | Default | Meaning |
 |---|---:|---|
 | <code>prometheus.url</code> | null | Optional base URL; null disables it. |
+| <code>prometheus.username</code> | null | Optional HTTP Basic username; set together with password. |
+| <code>prometheus.password</code> | null | Optional HTTP Basic password; never copied into collection artifacts. Protect the configuration file with mode 0600. |
 | <code>prometheus.timeout_seconds</code> | 3 | Short timeout so it cannot block emergency work. |
 | <code>prometheus.max_response_bytes</code> | 1048576 | Maximum response size. |
 
@@ -329,7 +335,7 @@ python3.8 dist/kdiag.pyz snapshot -i inventory.ini -g k8s_nodes \
 
 This preserves host evidence but prevents Kubernetes structural checks.
 
-Optional Prometheus can be set with <code>--prometheus-url http://host:9090</code>.
+Optional Prometheus can be set with <code>--prometheus-url http://host:9090</code>. For HTTP Basic authentication, use the JSON keys above or avoid a command-line secret with <code>--prometheus-username USER --prometheus-password-file /secure/prometheus-password</code>. The password file is read locally as UTF-8, trailing line endings are removed, and credentials are not written to the snapshot.
 
 | Exit | Meaning | Response |
 |---:|---|---|
@@ -362,9 +368,9 @@ Completeness is recorded for every node command, node Pod-log group, Kubernetes 
 
 The Markdown result summary explains why checks could not run and how many rules depend on each missing source; the complete technical list remains in `report.json`. If Kubernetes collection was intentionally disabled, dependent rules are marked not applicable. Even an unreachable Kubernetes bundle is read to retain its per-source failure details.
 
-The embedded catalogue still classifies recognized templates as routine, observe, actionable, or security. Routine/observe entries remain in confidential `normalized-events.json.gz`; only actionable/security entries without a duplicate deterministic finding are shown in `report.md` and `report.json`. No LLM, network, or external API is used.
+The embedded catalogue still classifies recognized templates as routine, observe, actionable, or security. Known successful image unpack, StatefulSet creation, cert-manager issuance, kube-rbac-proxy setup, and DNS-cleaner messages remain only in confidential `normalized-events.json.gz`. A routine/observe message is shown in the operator report only when local correlation detects an unhealthy related Pod or another explicit problem; actionable/security entries without a duplicate deterministic finding are also shown. No LLM, network, or external API is used.
 
-For Deckhouse authentication config, node collection records only file metadata for `/etc/kubernetes/deckhouse/extra-files/authentication-config.yaml`, never its contents. A log record proves a read error only at that timestamp. The report separately checks current host-file presence, API readyz, and kube-apiserver Pod readiness and warns that visibility inside the container mount namespace is not directly verified.
+For Deckhouse authentication config, node collection records only file metadata for `/etc/kubernetes/deckhouse/extra-files/authentication-config.yaml`, never its contents. A single read error during restart/reconciliation is treated as a normal transient race and omitted from findings. Repeated records are reported and correlated with current host-file presence, API readyz, and kube-apiserver Pod readiness; visibility inside the container mount namespace is not directly verified.
 
 Current-boot journals are requested newest-first. If `collection.max_command_bytes` truncates them, the newest incident-near records are retained. Increase that limit or reduce `collection.since_hours` when the report shows truncation.
 
@@ -509,14 +515,14 @@ Exact read-only commands for checking one node manually, together with a sanitiz
 | <code>dns.cluster_dns_mismatch</code> | fact | Explicit kubelet clusterDNS has no overlap with kube-dns ClusterIP values. | Check all address families/config sources, then use controlled rollout. |
 | <code>dns.nameserver_limit_exceeded</code> | fact | The kubelet resolver contains more than three nameservers. | Check kubelet resolvConf and use a reviewed local caching resolver if required. |
 | <code>dns.coredns_errors</code> | fact | CoreDNS logs contain SERVFAIL, forwarding-loop, or upstream-failure evidence. The report groups up to 20 extracted query names by type and occurrence count while retaining source line references. | Check the listed names for typos or nonexistent zones, then inspect forward targets, loop plugin, upstream reachability, and node resolver state. |
-| <code>dns.coredns_config_empty</code> | fact | The coredns ConfigMap has no non-empty Corefile. | Restore the approved Corefile through change control. |
+| <code>dns.coredns_config_empty</code> | fact | A collected d8-kube-dns, node-local-dns, or vanilla coredns ConfigMap has no non-empty Corefile. | Restore the approved Corefile through change control. |
 
 ### 12.8 Control plane and API
 
 | Rule | Type | What is checked | Safe first response |
 |---|---|---|---|
 | <code>controlplane.api_readyz_failed</code> | fact | Retrieved readyz verbose output contains failed named checks or endpoint failure. | Use the failed subcheck to select apiserver/dependency evidence. |
-| <code>controlplane.authentication_config_read_error</code> | fact | kube-apiserver reports that its configured authentication file cannot be read. | Check the effective flag, mount/path, permissions, and Deckhouse reconciliation window; do not create an empty replacement file. |
+| <code>controlplane.authentication_config_read_error</code> | fact | kube-apiserver repeatedly reports that its configured authentication file cannot be read; one transient record is suppressed. | Check current host metadata, readyz, Pod readiness, mount/path, permissions, and the Deckhouse reconciliation window; do not create an empty replacement file. |
 | <code>controlplane.apiservice_unavailable</code> | fact | Aggregated APIService Available=False or Unknown. | Inspect reason, backing Service/endpoints, TLS and extension server. |
 | <code>controlplane.node_lease_stale</code> | correlation | Node Lease absent or older than newest peer by max(120 s, 3 x leaseDurationSeconds). | Compare kubelet, API reachability, and clock; account for global API freeze. |
 | <code>controlplane.static_pod_unhealthy</code> | fact | Collected etcd/apiserver/scheduler/controller-manager mirror Pod absent or unhealthy. | Map to control-plane node and inspect static manifest, kubelet, container, dependencies. |
