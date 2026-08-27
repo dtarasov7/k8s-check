@@ -88,6 +88,7 @@ ETCD_CERT = "/etc/kubernetes/pki/etcd/healthcheck-client.crt"
 ETCD_KEY = "/etc/kubernetes/pki/etcd/healthcheck-client.key"
 AUTHENTICATION_CONFIG_PATHS = (
     "/etc/kubernetes/deckhouse/extra-files/authentication-config.yaml",
+    "/etc/kubernetes/deckhouse/extra0files/authentication-config.yaml",
 )
 
 
@@ -243,7 +244,6 @@ def _command_specs(since_hours):
         ("runtime_crictl_containers", ["crictl", "ps", "-a", "-o", "json"], "confidential"),
         ("runtime_crictl_version", ["crictl", "version"], "internal"),
         ("runtime_containerd_version", ["containerd", "--version"], "internal"),
-        ("runtime_crio_version", ["crio", "--version"], "internal"),
         ("runtime_runc_version", ["runc", "--version"], "internal"),
         ("cilium_status", ["cilium", "status", "--output", "json"], "internal"),
         ("cilium_debug_status", ["cilium-dbg", "status", "--output", "json"], "internal"),
@@ -351,12 +351,12 @@ def _cilium_container_fallback(commands, timeout_seconds, max_command_bytes):
     crictl = shutil.which("crictl")
     pods_record = command_by_id.get("runtime_crictl_pods", {})
     runtime_record = command_by_id.get("runtime_crictl_containers", {})
-    if not crictl or runtime_record.get("status") != "collected":
-        return []
-    try:
-        containers = json.loads(runtime_record.get("stdout", "")).get("containers", [])
-    except (AttributeError, TypeError, ValueError):
-        return []
+    containers = []
+    if crictl and runtime_record.get("status") == "collected":
+        try:
+            containers = json.loads(runtime_record.get("stdout", "")).get("containers", [])
+        except (AttributeError, TypeError, ValueError):
+            containers = []
     pod_sandboxes = {}
     if pods_record.get("status") == "collected":
         try:
@@ -389,45 +389,80 @@ def _cilium_container_fallback(commands, timeout_seconds, max_command_bytes):
             and re.fullmatch(r"[A-Za-z0-9_.:-]{8,256}", container_id)
         ):
             candidates.append((0 if recognized_pod else 1, namespace, pod_name, container_id, name))
-    if not candidates:
-        return []
-
-    _priority, namespace, pod_name, container_id, container_name = sorted(candidates)[0]
+    if candidates:
+        _priority, namespace, pod_name, container_id, container_name = sorted(candidates)[0]
+    else:
+        namespace, pod_name, container_id, container_name = "", "", None, "cilium-agent"
     specifications = []
     if not status_available:
         specifications.append(("cilium_debug_status", ["status", "--output", "json"], "internal", False))
     if not services_available:
         specifications.append(("cilium_debug_services", ["service", "list", "--output", "json"], "confidential", True))
+    executable_names = ("cilium-dbg", "cilium-debug", "cilium")
+    direct_binary = None
+    container_root_checked = False
+    if not container_id:
+        direct_binary = _process_root_executable(("cilium-agent",), executable_names)
+
     replacements = []
     for command_id, arguments, sensitivity, project_services in specifications:
-        for binary in (
-            "cilium-dbg",
-            "/usr/bin/cilium-dbg",
-            "/bin/cilium-dbg",
-            "cilium-debug",
-            "/usr/bin/cilium-debug",
-            "cilium",
-            "/usr/bin/cilium",
-            "/bin/cilium",
-        ):
-            result = run_process(
-                [crictl, "exec", container_id, binary] + arguments,
+        record = None
+        if crictl and container_id:
+            for binary in (
+                "cilium-dbg",
+                "/usr/bin/cilium-dbg",
+                "/bin/cilium-dbg",
+                "cilium-debug",
+                "/usr/bin/cilium-debug",
+                "cilium",
+                "/usr/bin/cilium",
+                "/bin/cilium",
+            ):
+                attempt = run_process(
+                    [crictl, "exec", container_id, binary] + arguments,
+                    min(timeout_seconds, 15),
+                    max_command_bytes,
+                ).record(command_id, sensitivity=sensitivity)
+                if attempt.get("status") != "collected":
+                    continue
+                try:
+                    json.loads(attempt.get("stdout", ""))
+                except (TypeError, ValueError):
+                    continue
+                attempt["transport"] = "crictl"
+                attempt["binary"] = binary
+                record = attempt
+                break
+        if record is None and crictl and container_id and not container_root_checked:
+            direct_binary = _container_root_executable(
+                crictl,
+                container_id,
+                executable_names,
                 min(timeout_seconds, 15),
                 max_command_bytes,
             )
-            record = result.record(command_id, sensitivity=sensitivity)
-            if record.get("status") != "collected":
-                continue
-            try:
-                json.loads(record.get("stdout", ""))
-            except (TypeError, ValueError):
-                continue
-            record["transport"] = "crictl"
+            container_root_checked = True
+            if not direct_binary:
+                direct_binary = _process_root_executable(("cilium-agent",), executable_names)
+        if record is None and direct_binary:
+            attempt = run_process(
+                [direct_binary] + arguments,
+                min(timeout_seconds, 15),
+                max_command_bytes,
+            ).record(command_id, sensitivity=sensitivity)
+            if attempt.get("status") == "collected":
+                try:
+                    json.loads(attempt.get("stdout", ""))
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    attempt["transport"] = "host-container-root"
+                    attempt["binary"] = direct_binary
+                    record = attempt
+        if record is not None:
             record["container"] = container_name
-            record["binary"] = binary
             record["pod"] = "{0}/{1}".format(namespace, pod_name) if namespace and pod_name else None
             replacements.append(_project_cilium_services(record) if project_services else record)
-            break
     return replacements
 
 
@@ -675,7 +710,45 @@ def _run_etcd_checks(prefix, ca_path, cert_path, key_path, timeout_seconds, max_
     return commands
 
 
-def _container_root_executable(crictl, container_id, name, timeout_seconds, max_command_bytes):
+def _root_executable(pid, names, proc_root="/proc"):
+    names = (names,) if isinstance(names, str) else tuple(names or ())
+    if int(pid) <= 1:
+        return None
+    for name in names:
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", str(name or "")):
+            continue
+        for path in ("/usr/bin/{0}", "/usr/local/bin/{0}", "/bin/{0}"):
+            candidate = Path(str(proc_root)) / str(pid) / ("root" + path.format(name))
+            try:
+                if candidate.is_file() and os.access(str(candidate), os.X_OK):
+                    return str(candidate)
+            except OSError:
+                continue
+    return None
+
+
+def _container_pid(document):
+    if not isinstance(document, dict):
+        return None
+    candidates = (document.get("info"), document.get("status"), document)
+    for value in candidates:
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                continue
+        if not isinstance(value, dict):
+            continue
+        try:
+            pid = int(value.get("pid"))
+        except (TypeError, ValueError):
+            continue
+        if pid > 1:
+            return pid
+    return None
+
+
+def _container_root_executable(crictl, container_id, names, timeout_seconds, max_command_bytes):
     if not re.fullmatch(r"[A-Za-z0-9_.:-]{8,256}", str(container_id or "")):
         return None
     inspected = run_process(
@@ -687,18 +760,36 @@ def _container_root_executable(crictl, container_id, name, timeout_seconds, max_
         return None
     try:
         document = json.loads(inspected.stdout.decode("utf-8"))
-        pid = int((document.get("info") or {}).get("pid"))
-    except (AttributeError, TypeError, ValueError):
+        pid = _container_pid(document)
+    except (TypeError, ValueError):
         return None
-    if pid <= 1:
+    if not pid:
         return None
-    for path in ("/usr/bin/{0}", "/usr/local/bin/{0}", "/bin/{0}"):
-        candidate = Path("/proc/{0}/root{1}".format(pid, path.format(name)))
-        try:
-            if candidate.is_file() and os.access(str(candidate), os.X_OK):
-                return str(candidate)
-        except OSError:
+    return _root_executable(pid, names)
+
+
+def _process_root_executable(process_names, executable_names, proc_root="/proc"):
+    allowed = set(str(name) for name in process_names or ())
+    root = Path(proc_root)
+    try:
+        processes = sorted(
+            (item for item in root.iterdir() if item.name.isdigit()),
+            key=lambda item: int(item.name),
+        )
+    except (OSError, ValueError):
+        return None
+    for process in processes[:65536]:
+        comm = _read_text(str(process / "comm"), 256).get("text", "").strip()
+        cmdline = _read_text(str(process / "cmdline"), 4096).get("text", "")
+        argv0 = os.path.basename(cmdline.split("\0", 1)[0]) if cmdline else ""
+        if comm not in allowed and argv0 not in allowed:
             continue
+        try:
+            executable = _root_executable(int(process.name), executable_names, proc_root=proc_root)
+        except (TypeError, ValueError):
+            continue
+        if executable:
+            return executable
     return None
 
 
@@ -762,7 +853,8 @@ def _etcd_snapshot(
 
     executable = shutil.which("etcdctl")
     executable_transport = "host"
-    if not executable and crictl and container_id and attempts and not _all_collected(attempts[0][1]):
+    fallback_needed = not attempts or not _all_collected(attempts[0][1])
+    if not executable and crictl and container_id and fallback_needed:
         executable = _container_root_executable(
             crictl,
             container_id,
@@ -771,7 +863,10 @@ def _etcd_snapshot(
             max_command_bytes,
         )
         executable_transport = "host-container-root"
-    if executable and (not attempts or not _all_collected(attempts[0][1])):
+    if not executable and fallback_needed:
+        executable = _process_root_executable(("etcd",), ("etcdctl",))
+        executable_transport = "host-container-root"
+    if executable and fallback_needed:
         attempts.append(
             (
                 executable_transport,

@@ -50,6 +50,26 @@ class MessageInsightsTest(unittest.TestCase):
                 self.assertIsNotNone(insight)
                 self.assertEqual("routine", insight["category"])
 
+        deckhouse_routine_messages = (
+            ("statefulset-controller", "delete Pod smoke-mini-a-0 in StatefulSet smoke-mini-a successful"),
+            ("kubelet", 'Container image "registry/image:tag" already present on machine'),
+            ("kubelet", 'Created container coredns'),
+            ("kubelet", 'PodCIDR on node ops-a is 10.0.0.0/24'),
+            ("kube-apiserver", 'policy_source.go: refreshing policies'),
+            ("cert-manager-certificaterequests-approver", "Certificate Request has been approved by cert-manager.io"),
+            ("cert-manager-certificates-issuing", "The certificate has been issued successfully"),
+            ("coredns", "[kubeforward] forward servers updated: [10.0.0.1]"),
+            ("coredns", "[kubeforward] number of endpointslices in cache for service d8-kube-dns"),
+            ("kube-rbac-proxy", "added liveness probe: path=/livez"),
+            ("kube-rbac-proxy", "valid token audiences: kubernetes.default.svc"),
+            ("control-plane-manager", '"level":"info","msg":"[patches] applied patch"'),
+        )
+        for component, message in deckhouse_routine_messages:
+            with self.subTest(component=component, message=message):
+                insight = match_message_insight(component, message)
+                self.assertIsNotNone(insight)
+                self.assertEqual("routine", insight["category"])
+
         expected_messages = (
             (
                 "cert-manager-certificaterequests-issuer-acme",
@@ -251,6 +271,29 @@ class MessageInsightsTest(unittest.TestCase):
         self.assertTrue(any(check["name"] == "api_readyz" and check["status"] == "problem" for check in upstream["checks"]))
         self.assertTrue(any(check["name"] == "endpoint_state" and check["status"] == "problem" for check in upstream["checks"]))
         self.assertTrue(any(check["name"] == "related_journal_events" for check in upstream["checks"]))
+
+    def test_routine_message_is_reportable_only_at_abnormal_volume(self):
+        insight = {
+            "insight_id": "kubelet_container_created",
+            "category": "routine",
+            "component": "kubelet",
+            "occurrence_range": {"minimum": 1000, "maximum": 1000},
+            "rate_per_hour_range": {"minimum": 20.0, "maximum": 20.0},
+        }
+        enriched = enrich_message_insights([insight], {}, {}, {})[0]
+        self.assertEqual("investigate", enriched["decision_state"])
+        self.assertTrue(any(check["name"] == "abnormal_message_volume" for check in enriched["checks"]))
+
+    def test_normal_routine_volume_stays_hidden(self):
+        insight = {
+            "insight_id": "kubelet_container_created",
+            "category": "routine",
+            "component": "kubelet",
+            "occurrence_range": {"minimum": 242, "maximum": 1090},
+            "rate_per_hour_range": {"minimum": 10.0, "maximum": 45.0},
+        }
+        enriched = enrich_message_insights([insight], {}, {}, {})[0]
+        self.assertEqual("routine", enriched["decision_state"])
 
 
 if __name__ == "__main__":

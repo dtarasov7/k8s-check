@@ -54,6 +54,7 @@ CONFIGMAP_CANDIDATES = {
         ("kube-system", "cilium-config"),
     ),
     "coredns_config": (
+        ("kube-system", "d8-kube-dns"),
         ("d8-kube-dns", "d8-kube-dns"),
         ("d8-kube-dns", "coredns"),
         ("kube-system", "coredns"),

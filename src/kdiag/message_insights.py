@@ -96,7 +96,7 @@ MESSAGE_INSIGHT_CATALOG = (
         "coredns_kubeforward_update",
         "routine",
         r"coredns|kube-dns",
-        r"kubeforward.*updated servers",
+        r"kubeforward.*(?:updated servers|forward servers updated|number of endpointslices in cache|successfully updated endpointslices)",
         "CoreDNS обновил upstream servers",
         "Плагин kubeforward применил новое состояние Service/Endpoint; сообщение само по себе успешно.",
         "Наблюдать только при непрерывном churn вместе с SERVFAIL/timeout или неготовыми DNS endpoints.",
@@ -117,7 +117,7 @@ MESSAGE_INSIGHT_CATALOG = (
         "kube_rbac_proxy_configured",
         "routine",
         r"kube-rbac-proxy",
-        r"(?:parsed upstream|parsing configuration from environment|using config|added upstream)",
+        r"(?:parsed upstream|parsing configuration from environment|using config|added upstream|ignored paths|added (?:liveness|readiness) probe|valid token audiences)",
         "kube-rbac-proxy загрузил конфигурацию",
         "Startup/configuration message без признака ошибки.",
         "Действовать только при частых рестартах Pod или соседнем bind/upstream failure.",
@@ -127,7 +127,7 @@ MESSAGE_INSIGHT_CATALOG = (
         "kubelet_image_unpack_success",
         "routine",
         r"kubelet",
-        r"container image .*unpacked successfully on machine",
+        r"container image .*(?:already present|unpacked successfully) on machine",
         "Образ контейнера успешно распакован",
         "kubelet завершил штатную подготовку образа. Это не ImagePull failure и не причина инцидента.",
         "Показывать только при одновременном нездоровом состоянии или частых рестартах связанного Pod.",
@@ -137,11 +137,41 @@ MESSAGE_INSIGHT_CATALOG = (
         "statefulset_pod_created_successfully",
         "routine",
         r"statefulset-controller",
-        r"create(?:d)? pod .* in statefulset .* successful",
-        "StatefulSet успешно создал Pod",
-        "Контроллер подтвердил успешный шаг reconciliation. Для штатного smoke-mini-* это ожидаемая запись.",
-        "Показывать только если созданный Pod не готов, перезапускается или rollout остановился.",
+        r"(?:create(?:d)?|delete(?:d)?) pod .* in statefulset .* successful",
+        "StatefulSet успешно обработал Pod",
+        "Контроллер подтвердил успешный шаг reconciliation. Для штатного smoke-mini-* создание и удаление Pod ожидаемы.",
+        "Показывать только если Pod не готов, перезапускается или rollout остановился.",
         "Скрывать успешную запись; состояние StatefulSet и Pod анализировать по структурным данным.",
+    ),
+    _entry(
+        "kubelet_container_created",
+        "routine",
+        r"kubelet",
+        r"created container\b",
+        "kubelet создал контейнер",
+        "Успешный этап запуска контейнера без самостоятельного признака ошибки.",
+        "Показывать только при аномальной частоте либо нездоровом связанном Pod.",
+        "Скрывать штатную запись; состояние Pod проверять по структурным данным.",
+    ),
+    _entry(
+        "kubelet_pod_cidr_assigned",
+        "routine",
+        r"kubelet",
+        r"podcidr on node .* is ",
+        "kubelet получил PodCIDR узла",
+        "Информационная запись об установленном диапазоне адресов Pod.",
+        "Показывать только при аномальной частоте или рядом с CNI/network failure.",
+        "Скрывать штатную запись; при сетевой проблеме сопоставить PodCIDR с Node и Cilium.",
+    ),
+    _entry(
+        "apiserver_policy_refresh",
+        "routine",
+        r"kube-apiserver|apiserver",
+        r"policy_source\.go.*refreshing policies",
+        "API server обновил политики",
+        "Штатный цикл перечитывания политик без признака ошибки.",
+        "Показывать только при аномальной частоте или соседней ошибке загрузки политики.",
+        "Скрывать информационную запись.",
     ),
     _entry(
         "cert_manager_waiting_for_approval",
@@ -164,6 +194,16 @@ MESSAGE_INSIGHT_CATALOG = (
         "Скрывать как успешную операцию cert-manager.",
     ),
     _entry(
+        "cert_manager_reconciliation_success",
+        "routine",
+        r"cert-manager",
+        r"(?:certificate\s*request has been approved|certificate has been issued successfully)",
+        "cert-manager успешно обработал запрос",
+        "Запрос одобрен либо сертификат успешно выдан; строка не содержит признака отказа.",
+        "Показывать только при аномальной частоте или нездоровом потребителе сертификата.",
+        "Скрывать штатную успешную запись.",
+    ),
+    _entry(
         "cert_manager_secret_initial_issue",
         "observe",
         r"cert-manager",
@@ -182,6 +222,16 @@ MESSAGE_INSIGHT_CATALOG = (
         "Компонент вывел интервал своей штатной периодической работы.",
         "Действие не требуется без DNS/CNI failures или нездорового Pod.",
         "Скрывать как startup-конфигурацию.",
+    ),
+    _entry(
+        "control_plane_patch_applied",
+        "routine",
+        r"control-plane-manager",
+        r"(?:\[patches\].*)?applied patch",
+        "Control-plane manager применил patch",
+        "Успешный шаг reconciliation без самостоятельного признака ошибки.",
+        "Показывать только при аномальной частоте, остановившемся rollout или нездоровом control-plane Pod.",
+        "Скрывать штатную запись; состояние control plane проверять по Pod и readyz.",
     ),
     _entry(
         "control_plane_pod_checksum_mismatch",
@@ -545,6 +595,28 @@ def _kesl_service_check(insight, node_snapshots):
         insight["missing_checks"].append("Связанный generated service state не входит в собранный allowlist")
 
 
+def _routine_volume_check(insight):
+    if insight.get("category") not in ("routine", "observe"):
+        return
+    occurrence = insight.get("occurrence_range") or {}
+    minimum = int(occurrence.get("minimum") or 0)
+    rate = insight.get("rate_per_hour_range") or {}
+    minimum_rate = float(rate.get("minimum") or 0.0)
+    high_total = minimum >= 1000
+    high_rate = minimum >= 100 and minimum_rate >= 100.0
+    if not high_total and not high_rate:
+        return
+    _add_check(
+        insight,
+        "abnormal_message_volume",
+        "problem",
+        "Штатный шаблон встретился гарантированно не менее {0} раз; нижняя оценка частоты {1}/ч. Это может указывать на churn или цикл reconciliation.".format(
+            minimum,
+            minimum_rate,
+        ),
+    )
+
+
 def enrich_message_insights(insights, node_snapshots, kubernetes, normalized):
     result = []
     default_state = {"routine": "routine", "observe": "monitor", "actionable": "monitor", "security": "security_review"}
@@ -570,6 +642,7 @@ def enrich_message_insights(insights, node_snapshots, kubernetes, normalized):
         elif insight_id == "systemd_sysv_compat_unit":
             _kesl_service_check(insight, node_snapshots)
         _component_pod_check(insight, kubernetes)
+        _routine_volume_check(insight)
         insight["counter_evidence"] = sorted(set(insight["counter_evidence"]))[:20]
         insight["missing_checks"] = sorted(set(insight["missing_checks"]))[:20]
         result.append(insight)

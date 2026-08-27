@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-08-27
+
+### Changed
+
+- Removed the direct `crio --version` probe. CRI-O remains supported through `crio.service` and CRI evidence, while an optional missing host binary no longer adds collection noise.
+- Routine success/info records from kubelet, StatefulSet, kube-apiserver policy refresh, cert-manager, kube-rbac-proxy, CoreDNS kubeforward, and control-plane-manager are classified locally and hidden. They are shown only with a correlated failure or guaranteed abnormal volume: at least 1,000 records, or at least 100 records with a lower-bound rate of 100 records/hour.
+- Historical Deckhouse authentication-config read errors are omitted when the file is currently present and readable, API `readyz` passes, and all collected kube-apiserver Pods are ready.
+
+### Fixed
+
+- When `crictl exec` fails or CRI inventory is unavailable, `cilium-dbg`/`cilium` is resolved only from standard paths in the rootfs of the exact running `cilium-agent` process; a successful read-only result supersedes host-probe failures.
+- `etcdctl` discovery accepts both object and JSON-string PID forms from `crictl inspect`, and falls back to standard paths in the rootfs of the exact running `etcd` process when CRI is unavailable.
+- Deckhouse DNS discovery now tries the actual `kube-system/d8-kube-dns` ConfigMap first while retaining legacy Deckhouse and vanilla fallbacks.
+
 ## [0.9.1] - 2026-08-27
 
 ### Fixed

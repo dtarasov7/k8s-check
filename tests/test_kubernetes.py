@@ -207,9 +207,35 @@ class KubernetesProjectionTest(unittest.TestCase):
         self.assertEqual(["d8-kube-dns", "kube-system"], [argv[argv.index("--namespace") + 1] for argv in calls])
 
     def test_deckhouse_configmap_names_precede_legacy_and_vanilla_names(self):
-        self.assertEqual(("d8-kube-dns", "d8-kube-dns"), CONFIGMAP_CANDIDATES["coredns_config"][0])
+        self.assertEqual(("kube-system", "d8-kube-dns"), CONFIGMAP_CANDIDATES["coredns_config"][0])
+        self.assertIn(("d8-kube-dns", "d8-kube-dns"), CONFIGMAP_CANDIDATES["coredns_config"])
         self.assertIn(("d8-kube-dns", "node-local-dns"), CONFIGMAP_CANDIDATES["node_local_dns_config"])
         self.assertEqual(("d8-cni-cilium", "cilium-configmap"), CONFIGMAP_CANDIDATES["cilium_config"][0])
+
+    def test_deckhouse_dns_configmap_is_selected_from_kube_system(self):
+        calls = []
+
+        def fake_run(argv, timeout_seconds, max_stdout_bytes):
+            calls.append(list(argv))
+            return ProcessResult(
+                list(argv),
+                0,
+                b'{"metadata":{"namespace":"kube-system","name":"d8-kube-dns"},"data":{"Corefile":".:53 { errors }"}}',
+                b"",
+                "start",
+                "end",
+                1,
+            )
+
+        collector = KubectlCollector(kubeconfig="/tmp/readonly", timeout_seconds=1, max_wire_bytes=1024 * 1024)
+        with patch("kdiag.kubernetes.run_process", side_effect=fake_run):
+            result = collector._first_json_source(
+                "coredns_config",
+                CONFIGMAP_CANDIDATES["coredns_config"],
+                project_coredns_config,
+            )
+        self.assertEqual("kube-system/d8-kube-dns", result["discovered_at"])
+        self.assertEqual(1, len(calls))
 
     def test_prometheus_basic_auth_header_is_used_but_not_saved(self):
         requests = []

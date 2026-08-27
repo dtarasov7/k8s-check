@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from kdiag.node import _container_root_executable, _etcd_snapshot
+from kdiag.node import _container_root_executable, _etcd_snapshot, _process_root_executable
 from kdiag.runner import ProcessResult
 
 
@@ -32,6 +32,31 @@ class EtcdCollectionTest(unittest.TestCase):
                 "/usr/bin/crictl", "container-id", "etcdctl", 5, 4096
             )
         self.assertEqual("/proc/4321/root/usr/bin/etcdctl", executable)
+
+    def test_container_root_executable_accepts_crictl_info_json_string(self):
+        inspected = result(
+            ["/usr/bin/crictl", "inspect", "container-id"],
+            b'{"info":"{\\"pid\\":4321}"}',
+        )
+        with patch("kdiag.node.run_process", return_value=inspected), patch(
+            "kdiag.node.Path.is_file", return_value=True
+        ), patch("kdiag.node.os.access", return_value=True):
+            executable = _container_root_executable(
+                "/usr/bin/crictl", "container-id", "etcdctl", 5, 4096
+            )
+        self.assertEqual("/proc/4321/root/usr/bin/etcdctl", executable)
+
+    def test_process_root_executable_uses_exact_running_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            process = root / "4321"
+            binary = process / "root/usr/bin/etcdctl"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("binary", encoding="utf-8")
+            binary.chmod(0o755)
+            (process / "comm").write_text("etcd\n", encoding="utf-8")
+            executable = _process_root_executable(("etcd",), ("etcdctl",), proc_root=str(root))
+        self.assertTrue(executable.endswith("/4321/root/usr/bin/etcdctl"))
 
     def test_non_control_plane_node_is_not_applicable(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -128,6 +153,34 @@ class EtcdCollectionTest(unittest.TestCase):
         self.assertEqual("host-container-root", value["transport"])
         self.assertEqual("crictl", value["fallback_from"])
         self.assertTrue(any(call[0] == "/proc/4321/root/usr/bin/etcdctl" for call in calls))
+
+    def test_missing_container_exec_falls_back_to_running_etcd_process_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = [root / name for name in ("etcd.yaml", "ca.crt", "health.crt", "health.key")]
+            for path in paths:
+                path.write_text("synthetic", encoding="utf-8")
+
+            def fake_run(argv, timeout_seconds, max_stdout_bytes):
+                if argv[0] == "/proc/4321/root/usr/bin/etcdctl":
+                    return result(argv, b'[]')
+                return result(argv, returncode=1)
+
+            with patch("kdiag.node.shutil.which", return_value=None), patch(
+                "kdiag.node._process_root_executable",
+                return_value="/proc/4321/root/usr/bin/etcdctl",
+            ), patch("kdiag.node.run_process", side_effect=fake_run):
+                value = _etcd_snapshot(
+                    True,
+                    5,
+                    4096,
+                    manifest_path=str(paths[0]),
+                    ca_path=str(paths[1]),
+                    cert_path=str(paths[2]),
+                    key_path=str(paths[3]),
+                )
+        self.assertEqual("collected", value["status"])
+        self.assertEqual("host-container-root", value["transport"])
 
 
 if __name__ == "__main__":

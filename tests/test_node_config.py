@@ -30,6 +30,10 @@ class NodeConfigTest(unittest.TestCase):
         journal = {check_id: argv for check_id, argv, _sensitivity in _command_specs(24)}["journal_services_current"]
         self.assertIn("containerd-deckhouse.service", journal)
 
+    def test_crio_binary_is_not_probed_directly(self):
+        command_ids = {check_id for check_id, _argv, _sensitivity in _command_specs(24)}
+        self.assertNotIn("runtime_crio_version", command_ids)
+
     def test_kubelet_cluster_dns_block_list_is_parsed(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.yaml"
@@ -159,6 +163,60 @@ class NodeConfigTest(unittest.TestCase):
         ]
         result = _apply_cilium_fallback(commands, replacements)
         self.assertEqual(["cilium_debug_status", "cilium_debug_services"], [item["id"] for item in result])
+
+    def test_cilium_falls_back_to_binary_in_agent_process_root(self):
+        commands = [
+            {"id": "runtime_crictl_pods", "status": "unsupported"},
+            {"id": "runtime_crictl_containers", "status": "unsupported"},
+            {"id": "cilium_status", "status": "unsupported"},
+            {"id": "cilium_debug_status", "status": "unsupported"},
+            {"id": "cilium_services", "status": "unsupported"},
+            {"id": "cilium_debug_services", "status": "unsupported"},
+        ]
+        calls = []
+
+        def fake_run(argv, timeout_seconds, max_stdout_bytes):
+            calls.append(list(argv))
+            stdout = b'{"services":[]}' if "service" in argv else b'{"cilium-health":{"overallHealth":"OK"}}'
+            return ProcessResult(list(argv), 0, stdout, b"", "start", "end", 1)
+
+        with patch("kdiag.node.shutil.which", return_value=None), patch(
+            "kdiag.node._process_root_executable",
+            return_value="/proc/4321/root/usr/bin/cilium-dbg",
+        ), patch("kdiag.node.run_process", side_effect=fake_run):
+            fallback = _cilium_container_fallback(commands, 5, 4096)
+        self.assertEqual(["cilium_debug_status", "cilium_debug_services"], [item["id"] for item in fallback])
+        self.assertTrue(all(item["transport"] == "host-container-root" for item in fallback))
+        self.assertTrue(all(call[0] == "/proc/4321/root/usr/bin/cilium-dbg" for call in calls))
+
+    def test_failed_cilium_exec_uses_inspected_container_root(self):
+        commands = [
+            {
+                "id": "runtime_crictl_pods",
+                "status": "collected",
+                "stdout": '{"items":[{"id":"sandbox12345678","metadata":{"name":"agent-node-a","namespace":"d8-cni-cilium"}}]}',
+            },
+            {
+                "id": "runtime_crictl_containers",
+                "status": "collected",
+                "stdout": '{"containers":[{"id":"abcdef1234567890","podSandboxId":"sandbox12345678","metadata":{"name":"cilium-agent"},"state":"CONTAINER_RUNNING"}]}',
+            },
+        ]
+
+        def fake_run(argv, timeout_seconds, max_stdout_bytes):
+            if argv[:2] == ["/opt/deckhouse/bin/crictl", "exec"]:
+                return ProcessResult(list(argv), 1, b"", b"exec disabled", "start", "end", 1)
+            stdout = b'{"services":[]}' if "service" in argv else b'{"cilium-health":{"overallHealth":"OK"}}'
+            return ProcessResult(list(argv), 0, stdout, b"", "start", "end", 1)
+
+        with patch("kdiag.node.shutil.which", return_value="/opt/deckhouse/bin/crictl"), patch(
+            "kdiag.node._container_root_executable",
+            return_value="/proc/4321/root/usr/bin/cilium-dbg",
+        ), patch("kdiag.node.run_process", side_effect=fake_run):
+            fallback = _cilium_container_fallback(commands, 5, 4096)
+        self.assertEqual(2, len(fallback))
+        self.assertTrue(all(item["transport"] == "host-container-root" for item in fallback))
+        self.assertTrue(all(item["pod"] == "d8-cni-cilium/agent-node-a" for item in fallback))
 
 
 if __name__ == "__main__":

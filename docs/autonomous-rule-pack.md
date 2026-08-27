@@ -1,6 +1,6 @@
 # Автономный rule pack kdiag
 
-Rule pack `2026.08.12` содержит 98 проверок и работает без сети, LLM и внешней базы знаний. После сборки все классификаторы, карточки правил, ссылки на первичные источники и synthetic self-test входят в `kdiag.pyz`.
+Rule pack `2026.08.13` содержит 98 проверок и работает без сети, LLM и внешней базы знаний. После сборки все классификаторы, карточки правил, ссылки на первичные источники и synthetic self-test входят в `kdiag.pyz`.
 
 ## Модель достоверности
 
@@ -15,6 +15,7 @@ Rule pack `2026.08.12` содержит 98 проверок и работает 
 1. JSON-строки journald, node CRI logs, Kubernetes Events, Node conditions, Pod/container states и разрешённые Pod logs приводятся к единому event envelope.
 2. Текст классифицируется по устойчивым семантическим признакам: component/reason, errno, cgroup path, Kubernetes reason и network error class. Точные динамические значения не входят в fingerprint.
    Штатные CoreDNS smoke queries `smoke-mini-*` исключаются из derived events/findings, но не из raw evidence.
+   Известные success/info-шаблоны скрыты из операторского отчёта. Штатный шаблон повышается до проверки только при связанной неисправности или гарантированном аномальном объёме: минимум 1000 записей либо минимум 100 записей при нижней оценке 100 записей/ч; оценочная верхняя граница не используется.
 3. Категоризированные записи дедуплицируются и round-robin ограничиваются по source/scope/category; счётчики dropped/truncated сохраняются по источникам.
 4. Корреляции используют только реальные, не inferred timestamps. Probe episodes ограничены одним Pod, node/runtime/CNI/storage — одним Node. Для независимых episodes сохраняются start/end/duration/ID.
 5. Rule evaluator формирует findings с `classification`, detection/causal confidence, bounded evidence excerpts, alternatives, counter-evidence, missing checks и безопасной рекомендацией.
@@ -35,12 +36,12 @@ Rule pack `2026.08.12` содержит 98 проверок и работает 
 - осторожная корреляция KESL с cgroup denial и отдельный ptrace alert без утверждения причинности/вредоносности;
 - kernel OOM и conntrack table full;
 - адаптированные Node Problem Detector `v0.8.25` signatures: KernelOops, TaskHung, netdevice, EXT4/XFS, Buffer I/O и hardware errors;
-- Service → EndpointSlice → ready endpoint/port; Deckhouse `d8-kube-dns`, прежний redirect-Service, ExternalName `kube-dns`, `node-local-dns` и vanilla kube-dns/CoreDNS; Corefile plugins/forward targets и kubelet resolver/clusterDNS;
+- Service → EndpointSlice → ready endpoint/port; Deckhouse ConfigMap `kube-system/d8-kube-dns`, Service `d8-kube-dns`, прежний redirect-Service, ExternalName `kube-dns`, `node-local-dns` и vanilla kube-dns/CoreDNS; Corefile plugins/forward targets и kubelet resolver/clusterDNS;
 - Cilium kube-proxy replacement и сравнение Service ClusterIP с read-only service maps; отсутствие kube-proxy само по себе штатно;
-- API server readyz, ошибки чтения authentication config, aggregated APIService, Node Lease и control-plane Pod health;
-- stacked-etcd endpoint health/status, active alarms, Raft/revision lag, backend quota, fragmentation и member version drift через allowlisted read-only commands; container-local etcdctl имеет приоритет над host fallback;
+- API server readyz, устойчивые ошибки чтения authentication config при неподтверждённом текущем состоянии, aggregated APIService, Node Lease и control-plane Pod health;
+- stacked-etcd endpoint health/status, active alarms, Raft/revision lag, backend quota, fragmentation и member version drift через allowlisted read-only commands; container-local etcdctl имеет приоритет, затем используется стандартный путь rootfs точного процесса `etcd`, без общего поиска по containerd snapshots;
 - PVC/PV/StorageClass, VolumeAttachment, CSIDriver/CSINode и CiliumEndpoint/CiliumNode/policy status;
-- CRI RuntimeReady/NetworkReady, активный swap, отдельные runtime filesystems и Kubernetes version skew;
+- CRI RuntimeReady/NetworkReady, активный swap, отдельные runtime filesystems и Kubernetes version skew; CRI-O определяется по CRI и `crio.service` без прямого запуска host-команды `crio`;
 - time synchronization, X.509 `notAfter` и целостность symlink ротации kubelet client certificate;
 - firing alerts, failed config reload и corruption counter из необязательного Prometheus API, включая HTTP Basic authentication без сохранения credentials в snapshot;
 - runtime, CNI, memory/OOM, certificate/API и conntrack/network correlations.

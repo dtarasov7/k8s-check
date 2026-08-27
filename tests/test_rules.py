@@ -136,7 +136,7 @@ class RulesTest(unittest.TestCase):
         rule_ids = {item["rule_id"] for item in evaluate_rules(collection, {"node-1": snapshot}, kubernetes)}
         self.assertNotIn("inventory.node_set_mismatch", rule_ids)
 
-    def test_repeated_controlplane_auth_config_and_ptrace_alerts_are_findings(self):
+    def test_resolved_controlplane_auth_config_is_hidden_but_ptrace_is_reported(self):
         normalized = {
             "events": [
                 {
@@ -145,7 +145,7 @@ class RulesTest(unittest.TestCase):
                     "source": "kubernetes_pod_log",
                     "component": "kube-apiserver",
                     "evidence": "kubernetes.json.gz#logs.entries[0]",
-                    "message_excerpt": "Failed to read authentication config file: no such file or directory",
+                    "message_excerpt": "Failed to read authentication config file /etc/kubernetes/deckhouse/extra0files/authentication-config.yaml: no such file or directory",
                     "timestamp": "2026-01-01T00:00:00Z",
                     "occurrence_count": 2,
                 },
@@ -198,13 +198,25 @@ class RulesTest(unittest.TestCase):
         }
         findings = evaluate_rules({"nodes": []}, nodes, kubernetes, normalized)
         rule_ids = {item["rule_id"] for item in findings}
-        self.assertIn("controlplane.authentication_config_read_error", rule_ids)
+        self.assertNotIn("controlplane.authentication_config_read_error", rule_ids)
         self.assertIn("security_agent.ptrace_alert", rule_ids)
-        auth = next(item for item in findings if item["rule_id"] == "controlplane.authentication_config_read_error")
-        self.assertIn("в моменты записей", auth["summary"])
-        self.assertTrue(any("существует сейчас" in value for value in auth["counter_evidence"]))
-        self.assertTrue(any("readyz" in value for value in auth["counter_evidence"]))
-        self.assertIn("не подтверждено", auth["recommendation"])
+
+    def test_repeated_unresolved_auth_config_error_is_reported(self):
+        normalized = {
+            "events": [
+                {
+                    "event_id": "auth",
+                    "categories": ["authentication_config_read_error"],
+                    "source": "kubernetes_pod_log",
+                    "component": "kube-apiserver",
+                    "message_excerpt": "Failed to read authentication config file: no such file or directory",
+                    "occurrence_count": 2,
+                }
+            ],
+            "correlations": [],
+        }
+        findings = evaluate_rules({"nodes": []}, {}, {}, normalized)
+        self.assertIn("controlplane.authentication_config_read_error", {item["rule_id"] for item in findings})
 
     def test_one_off_auth_config_race_is_not_reported(self):
         normalized = {

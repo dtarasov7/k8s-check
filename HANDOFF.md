@@ -2,47 +2,36 @@
 
 ## Goal
 
-After validating `kdiag 0.9.1` Cilium/etcd collection on real vanilla and Deckhouse clusters, evolve the snapshot into a tool that separates routine checks from incident analysis and ranks evidence-backed root-cause hypotheses.
+Проверить `kdiag 0.9.2` на реальном Deckhouse-кластере и затем продолжить развитие корреляции первопричин и режимов обычной проверки/инцидента.
 
 ## Changed files
 
-- `src/kdiag/node.py` -> CRI Pod-aware Cilium discovery, absolute container CLI paths, equivalent-host-error replacement, and etcdctl fallback through the exact running container rootfs.
-- `tests/test_node_config.py`, `tests/test_node_etcd.py` -> vanilla/Deckhouse Cilium and failed-etcd-exec regressions.
-- `src/kdiag/__init__.py`, `CHANGELOG*.md`, `README*.md`, `docs/UserGuide*.md`, `docs/k8s-diagnostic-system-implementation-plan-no-llm.md`, `dist/kdiag.pyz` -> patch release `0.9.1` and documentation.
-- Existing roadmap for snapshot, baseline, and continuous collection -> see `docs/k8s-diagnostic-system-implementation-plan-no-llm.md`.
-- Existing LLM roadmap and privacy boundary -> see `docs/k8s-diagnostic-system-llm-implementation-plan.md` and `diagramms/llm-data-boundary-ru.puml`.
+- `src/kdiag/node.py` -> убран прямой `crio --version`; PID из `crictl inspect` читается из объекта или JSON-строки; `etcdctl`, `cilium-dbg` и `cilium` имеют ограниченный fallback через стандартные пути rootfs точного процесса `etcd`/`cilium-agent`; поддержаны оба известных пути Deckhouse authentication config.
+- `src/kdiag/kubernetes.py` -> ConfigMap `kube-system/d8-kube-dns` стал первым Deckhouse DNS-кандидатом; старые Deckhouse и vanilla варианты сохранены.
+- `src/kdiag/message_insights.py` -> распознаны штатные success/info-шаблоны со скриншота; они скрыты без связанной проблемы и повышаются до проверки только при гарантированном минимуме 1000 записей либо минимуме 100 записей и 100 записей/ч.
+- `src/kdiag/rules.py`, `src/kdiag/rule_catalog.py` -> разрешившаяся authentication-config race скрывается при существующем читаемом файле, успешном readyz и готовых kube-apiserver Pod; rule pack `2026.08.13`.
+- `src/kdiag/__init__.py`, `dist/kdiag.pyz` -> версия `0.9.2`.
+- `tests/test_node_config.py`, `tests/test_node_etcd.py`, `tests/test_kubernetes.py`, `tests/test_message_insights.py`, `tests/test_rules.py` -> regression-тесты новых fallback, DKP DNS, CRI-O probe, штатных сообщений и authentication config.
+- `README-ru.md`, `README.md`, `docs/UserGuide-ru.md`, `docs/UserGuide.md`, `docs/a.md`, `docs/autonomous-rule-pack.md`, `docs/k8s-diagnostic-system-implementation-plan-no-llm.md`, `docs/todo.md`, `CHANGELOG-ru.md`, `CHANGELOG.md` -> контракт и выпуск `0.9.2`.
 
 ## Current failure
 
-No local runtime failure. Real-cluster validation is still required for Cilium 1.14 (`kube-system/cilium-*`), Deckhouse Cilium 1.17 (`d8-cni-cilium/agent-*`), and Deckhouse etcd with rejected `crictl exec`.
+Локальных ошибок нет. Реальный Deckhouse canary `0.9.2` ещё не выполнен; `0.9.1` на целевом кластере не находил `etcdctl`/`cilium-dbg` и создавал шум по DNS/authentication/success-сообщениям.
 
 ## Current hypothesis
 
-The smallest coherent next increment is one collection pipeline with explicit `--purpose check|incident` metadata and an optional incident window. `check` should emphasize active faults/configuration defects; `incident` should add temporal relevance and distinguish likely cause, consequence, concurrent issue, and unrelated history. Do not call a successful snapshot a baseline; baseline needs an explicit approval lifecycle.
-
-Current limitations established by code review:
-
-- correlation is eight fixed category pairs in a 15-minute window, scoped mostly to one node or Pod (`src/kdiag/normalize.py`);
-- findings are ordered by severity/rule ID, not causal likelihood (`src/kdiag/rules.py`);
-- Prometheus collects only alerts and runtime information, not range-query metric history (`src/kdiag/kubernetes.py`);
-- the external LLM profile is reversible pseudonymization with fail-closed DLP, not guaranteed anonymity (`src/kdiag/llm_export.py`);
-- rule metadata declares Kubernetes 1.24-1.31, so unbounded `1.24+` support is not yet an honest claim (`src/kdiag/rule_catalog.py`);
-- Deckhouse adaptations are synthetic-test verified, but the target-cluster canary is still pending;
-- Kubernetes API audit logs remain intentionally outside the snapshot scope.
+Причиной пропуска бинарников были запрещённый container exec, единственная ожидаемая форма PID в CRI inspect и отсутствие process-root fallback для Cilium. Шум отчёта возникал из-за неверного первого namespace ConfigMap, unconditional finding для уже разрешившейся authentication race и неполного каталога штатных шаблонов.
 
 ## Test results
 
 - `env PYTHONPATH=src python3 -m compileall -q src tests scripts` -> passed.
-- `env PYTHONPATH=src python3 -m unittest discover -s tests -q` -> 119 tests passed.
-- `python3 scripts/build.py` -> passed; `dist/kdiag.pyz` SHA-256 `d557d85e7bc21483a8671d3d09af019844e541661d9f26e94f6fb562ff2919be`.
-- `python3 dist/kdiag.pyz --version` -> `0.9.1`.
-- `python3 dist/kdiag.pyz self-test` -> passed; rule pack `2026.08.12`; 98 rules.
-
-## Suggested skills
-
-- `karpathy-guidelines` for a minimal, test-driven implementation of purpose/window semantics.
-- `create-plan` if the user asks to plan the broader Prometheus, causal-graph, baseline, and compatibility work before coding.
+- `env PYTHONPATH=src python3 -m unittest discover -s tests -q` -> 129 tests passed.
+- `python3 scripts/build.py` -> passed.
+- `python3 dist/kdiag.pyz --version` -> `0.9.2`.
+- `python3 dist/kdiag.pyz self-test` -> passed; rule pack `2026.08.13`; 98 rules.
+- `sha256sum dist/kdiag.pyz` -> `69cbafd68d818c96215d6d21cdd9fb216e3275956fd8c1d64dc74d6b843b539c`.
+- `git status --short` -> unavailable: рабочий `.git` не содержит метаданных репозитория (`fatal: not a git repository`).
 
 ## Next step
 
-Run `python3 dist/kdiag.pyz snapshot -i inventory.ini --config config/snapshot.json -o kdiag-data` on a target cluster and inspect Cilium command coverage plus `facts.etcd.transport` before starting purpose/window work.
+Запустить `python3 dist/kdiag.pyz snapshot -i inventory.ini --config config/snapshot.json -o kdiag-data-0.9.2`, затем проверить transport Cilium/etcd и отсутствие указанных ложных сообщений в `report.md`.

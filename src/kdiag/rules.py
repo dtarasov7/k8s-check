@@ -152,10 +152,17 @@ def _collection_gap_summary(values):
     return "; ".join(details)
 
 
+def _authentication_config_path_key(value):
+    return str(value or "").replace("/extra0files/", "/extra-files/")
+
+
 def _authentication_config_context(node_snapshots, kubernetes, events):
     paths = set()
     for event in events:
-        paths.update(AUTH_CONFIG_PATH_RE.findall(str(event.get("message_excerpt") or "")))
+        paths.update(
+            _authentication_config_path_key(path)
+            for path in AUTH_CONFIG_PATH_RE.findall(str(event.get("message_excerpt") or ""))
+        )
     counter_evidence = []
     missing_checks = [
         "Видимость файла внутри mount namespace контейнера kube-apiserver напрямую не проверяется."
@@ -168,7 +175,7 @@ def _authentication_config_context(node_snapshots, kubernetes, events):
             continue
         metadata_collected = True
         for item in file_items or []:
-            if paths and item.get("path") not in paths:
+            if paths and _authentication_config_path_key(item.get("path")) not in paths:
                 continue
             if item.get("status") == "present":
                 present.append((node_name, item))
@@ -2285,30 +2292,25 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
     auth_config_occurrences = sum(int(event.get("occurrence_count") or 1) for event in auth_config_events)
     if auth_config_occurrences > 1:
         context = _authentication_config_context(node_snapshots, kubernetes, auth_config_events)
-        recommendation = (
-            "Текущее отсутствие файла не подтверждено. Если после последней записи ошибка не повторяется, readyz и Pod остаются исправны, действие не требуется. "
-            "При новых ошибках проверить mount файла внутри kube-apiserver и события Deckhouse reconciliation."
-            if context["current_healthy"]
-            else "Проверить фактический флаг authentication-config, наличие и mount файла внутри kube-apiserver, затем Deckhouse reconciliation вокруг первой/последней записи; не создавать пустой файл."
-        )
-        finding = _event_finding(
-            "controlplane.authentication_config_read_error",
-            "info" if context["current_healthy"] else "warning",
-            "В журнале kube-apiserver была ошибка чтения authentication config",
-            "Обнаружено повторяющихся записей: {0}. Они доказывают ошибку чтения в моменты записей, но не доказывают, что файл отсутствует сейчас или API server недоступен.".format(auth_config_occurrences),
-            auth_config_events,
-            recommendation,
-            confidence="none",
-            alternatives=[
-                "краткое окно атомарной замены файла",
-                "файл существует на host, но временно не виден в mount namespace контейнера",
-                "устаревший flag или mount после reconciliation",
-            ],
-            classification="fact",
-        )
-        finding["counter_evidence"] = context["counter_evidence"][:20]
-        finding["missing_checks"] = context["missing_checks"][:20]
-        findings.append(finding)
+        if not context["current_healthy"]:
+            finding = _event_finding(
+                "controlplane.authentication_config_read_error",
+                "warning",
+                "В журнале kube-apiserver повторяется ошибка чтения authentication config",
+                "Обнаружено повторяющихся записей: {0}. Текущее исправное состояние файла, readyz и Pod kube-apiserver одновременно не подтверждено.".format(auth_config_occurrences),
+                auth_config_events,
+                "Проверить фактический флаг authentication-config, наличие и mount файла внутри kube-apiserver, затем Deckhouse reconciliation вокруг первой/последней записи; не создавать пустой файл.",
+                confidence="none",
+                alternatives=[
+                    "краткое окно атомарной замены файла",
+                    "файл существует на host, но временно не виден в mount namespace контейнера",
+                    "устаревший flag или mount после reconciliation",
+                ],
+                classification="fact",
+            )
+            finding["counter_evidence"] = context["counter_evidence"][:20]
+            finding["missing_checks"] = context["missing_checks"][:20]
+            findings.append(finding)
 
     ptrace_events = _events(normalized, "ptrace_security_alert", {"journal"})
     if ptrace_events:
