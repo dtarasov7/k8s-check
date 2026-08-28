@@ -42,7 +42,7 @@ CATEGORY_PATTERNS = (
     ("dns_forward_loop", re.compile(r"plugin/loop|loop detected|forwarding loop", re.I)),
     ("dns_upstream_failure", re.compile(r"coredns.*(?:upstream|forward).*(?:timeout|unreachable|refused)|plugin/errors.*(?:timeout|refused|unreachable)", re.I)),
     ("selinux_denial", re.compile(r"avc:\s+denied|selinux.*denied", re.I)),
-    ("authentication_config_read_error", re.compile(r"(?:failed|unable) to read authentication config file.*(?:no such file|permission denied|is a directory)", re.I)),
+    ("authentication_config_read_error", re.compile(r"authentication config file.*(?:no such file|permission denied|is a directory)", re.I)),
     ("ptrace_security_alert", re.compile(r"ptrace attack of .{1,512} was attempted by", re.I)),
 )
 

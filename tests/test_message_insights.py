@@ -98,6 +98,46 @@ class MessageInsightsTest(unittest.TestCase):
                 self.assertIsNotNone(insight)
                 self.assertEqual(category, insight["category"])
 
+    def test_deckhouse_log_noise_is_classified_and_stack_trace_remains_actionable(self):
+        routine_messages = (
+            ("kubelet", "Start container pause"),
+            ("cert-manager-certificates-issuing", "The certificate has been successfully issued"),
+            ("coredns", "[kubeforward] successfully updated endpoint slice for service d8-kube-dns"),
+            ("coredns", "proceeding to serve DNS server"),
+            ("coredns", "maxprocs: Leaving GOMAXPROCS=16: CPU quota undefined"),
+            ("coredns", "plugin/forward: dialing d8-kube-dns-a -> d8-kube-dns-b"),
+            ("kube-rbac-proxy", "Generating self signed cert as no cert is provided"),
+            ("kube-rbac-proxy", "Running on :8080"),
+            ("control-plane-manager", '"level":"info","msg":"podcidr on node m06.local is 10.0.0.0/24"'),
+            ("control-plane-manager", '"level":"info","msg":"kubeclient successful init"'),
+            ("stale-dns-connections-cleaner", "checks interval: 30, timeout: 10"),
+            ("stale-dns-connections-cleaner", "established connection count: 0"),
+        )
+        for component, message in routine_messages:
+            with self.subTest(component=component, message=message):
+                insight = match_message_insight(component, message)
+                self.assertIsNotNone(insight)
+                self.assertEqual("routine", insight["category"])
+
+        ignored_document = match_message_insight(
+            "control-plane-manager",
+            "warning: ignored yaml document with groupVersionKind kubeadm.k8s.io/v1beta4, kind=JoinConfiguration",
+        )
+        self.assertEqual("observe", ignored_document["category"])
+
+        auth_file = match_message_insight(
+            "kube-apiserver",
+            'watching authentication config file err="no such file or directory"',
+        )
+        self.assertEqual("actionable", auth_file["category"])
+
+        stack = match_message_insight(
+            "coredns",
+            'runtime/debug.Stack() /usr/local/go/src/runtime/debug/stack.go:26',
+        )
+        self.assertEqual("go_runtime_stack_trace", stack["insight_id"])
+        self.assertEqual("actionable", stack["category"])
+
     def test_security_catalog_also_enriches_a_categorized_event(self):
         message = 'ptrace attack of "/opt/target" was attempted by "/opt/kaspersky/kesl"'
         normalized = normalize_evidence(

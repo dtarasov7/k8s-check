@@ -5,7 +5,7 @@ from pathlib import Path
 
 from unittest.mock import patch
 
-from kdiag.node import KUBELET_CONFIG_KEYS, SERVICE_UNITS, _allowlisted_top_level_config, _authentication_config_files, _apply_cilium_fallback, _cilium_container_fallback, _command_specs, _kubelet_certificate_rotation, _project_cri_records, _resolv_conf_facts
+from kdiag.node import KUBELET_CONFIG_KEYS, SERVICE_UNITS, _allowlisted_top_level_config, _authentication_config_files, _apply_cilium_fallback, _cilium_container_fallback, _command_specs, _kubelet_certificate_rotation, _project_cilium_services, _project_cri_records, _resolv_conf_facts
 from kdiag.runner import ProcessResult
 
 
@@ -65,6 +65,51 @@ class NodeConfigTest(unittest.TestCase):
         projected = _project_cri_records(record, "containers")
         self.assertNotIn("SECRET", projected["stdout"])
         self.assertEqual("app", __import__("json").loads(projected["stdout"])["containers"][0]["metadata"]["name"])
+
+    def test_cilium_v117_service_projection_uses_realized_api_state(self):
+        record = {
+            "id": "cilium_debug_services",
+            "status": "collected",
+            "stdout": json.dumps(
+                [
+                    {
+                        "spec": {
+                            "id": 42,
+                            "flags": {"namespace": "kube-system", "name": "kube-dns", "type": "ClusterIP"},
+                            "frontend-address": {"ip": "10.96.0.99", "port": 53},
+                        },
+                        "status": {
+                            "realized": {
+                                "id": 42,
+                                "frontend-address": {"ip": "10.96.0.10", "port": 53, "protocol": "udp"},
+                                "backend-addresses": [{"ip": "10.0.0.2", "port": 5353, "state": "active"}],
+                            }
+                        },
+                    }
+                ]
+            ),
+        }
+        projected = _project_cilium_services(record)
+        service = json.loads(projected["stdout"])["services"][0]
+        self.assertEqual("collected", projected["status"])
+        self.assertEqual({"ip": "10.96.0.10", "port": 53, "protocol": "udp"}, service["frontend"])
+        self.assertEqual("kube-system/kube-dns", service["name"])
+        self.assertEqual("ClusterIP", service["type"])
+
+    def test_cilium_projection_rejects_unrealized_or_unknown_json(self):
+        unrealized = _project_cilium_services(
+            {
+                "id": "cilium_debug_services",
+                "status": "collected",
+                "stdout": '{"services":[{"spec":{"frontend-address":{"ip":"10.0.0.1","port":443}},"status":{}}]}',
+            }
+        )
+        unknown = _project_cilium_services(
+            {"id": "cilium_debug_services", "status": "collected", "stdout": '{"unexpected":[]}'}
+        )
+        self.assertEqual("malformed", unrealized["status"])
+        self.assertIn("without a realized frontend", unrealized["error"])
+        self.assertEqual("malformed", unknown["status"])
 
     def test_resolver_and_kubelet_certificate_symlink(self):
         with tempfile.TemporaryDirectory() as directory:

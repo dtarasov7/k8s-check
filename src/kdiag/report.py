@@ -416,19 +416,6 @@ def _rule_ledger(findings, coverage, options):
     return ledger
 
 
-def _select_unknown_fingerprints(values, limit=20, per_component=5):
-    grouped = {}
-    for item in values:
-        grouped.setdefault(str(item.get("component") or "unknown"), []).append(item)
-    ranked = []
-    for component, items in grouped.items():
-        ordered = sorted(items, key=lambda item: (-int(item.get("count") or 0), str(item.get("fingerprint") or "")))
-        for rank, item in enumerate(ordered[:per_component]):
-            ranked.append((rank, -int(item.get("count") or 0), component, item))
-    selected = [item for _rank, _count, _component, item in sorted(ranked)[:limit]]
-    return selected, max(0, len(values) - len(selected))
-
-
 STATUS_LABELS = {
     "collected": "собрано",
     "partial": "собрано частично",
@@ -1152,10 +1139,12 @@ def build_report(collection_dir):
         [
             "## Обработка и сопоставление журналов",
             "",
-            "Обработано записей: {0}; распознано: {1}; не распознано: {2}; повреждено: {3}; исключено вне окна инцидента: {4}; совпадений по времени: {5}; данные усечены: {6}; заменено редких шаблонов: {7}.".format(
+            "Обработано записей: {0}; с диагностической категорией: {1}; без диагностической категории: {2}; распознано шаблонов каталога: {3}; сохранено неизвестных шаблонов: {4}; повреждено: {5}; исключено вне окна инцидента: {6}; совпадений по времени: {7}; данные усечены: {8}; заменено редких шаблонов: {9}.".format(
                 stats.get("input_records", 0),
                 stats.get("categorized_records", 0),
                 stats.get("uncategorized_records", 0),
+                stats.get("message_insight_fingerprints", 0),
+                stats.get("unknown_retained_fingerprints", 0),
                 stats.get("malformed_records", 0),
                 stats.get("incident_window_filtered_records", 0),
                 len(normalized.get("correlations", [])),
@@ -1165,32 +1154,14 @@ def build_report(collection_dir):
             "",
         ]
     )
-    unknown, unknown_omitted = _select_unknown_fingerprints(normalized.get("unknown_fingerprints", []))
-    if unknown:
+    unknown_count = len(normalized.get("unknown_fingerprints", []))
+    if unknown_count:
         lines.extend(
             [
-                "### Частые нераспознанные сообщения",
-                "",
-                "Это не обнаруженные проблемы, а частые шаблоны, смысл которых ещё не описан встроенными правилами. Полный список остаётся в `normalized-events.json.gz`.",
+                "Сохранено неизвестных шаблонов: {0}. Их тексты не выводятся в основной отчёт без проверенной интерпретации и рекомендации. Полный ограниченный набор сохранён в `normalized-events.json.gz`; автоматически классифицированные сообщения, для которых требуется действие, показаны выше отдельными карточками.".format(unknown_count),
                 "",
             ]
         )
-        for item in unknown:
-            occurrence = item.get("occurrence_range") or {}
-            lines.extend(
-                [
-                    "- {0} — гарантированно не менее {1}, оценочная верхняя граница {2}; погрешность оценки не более {3}.".format(
-                        markdown_code(item.get("component") or "unknown"),
-                        markdown_escape(occurrence.get("minimum", item.get("count"))),
-                        markdown_escape(occurrence.get("maximum", item.get("count"))),
-                        markdown_escape(item.get("estimate_error", 0)),
-                    ),
-                    "  Шаблон: {0}".format(markdown_code(_bounded_report_text(item.get("template")))),
-                ]
-            )
-        if unknown_omitted:
-            lines.append("- В Markdown опущено шаблонов: {0}.".format(unknown_omitted))
-        lines.append("")
     correlations = normalized.get("correlations", [])
     if correlations:
         lines.extend(["## Совпадения признаков по времени", "", "| Эпизод | Тип | Объект | Начало | Конец | Длительность, с |", "|---|---|---|---|---|---:|"])

@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,6 @@ from kdiag.report import (
     _coverage_display_rows,
     _rule_ledger,
     _render_message_insights,
-    _select_unknown_fingerprints,
     build_report,
     load_collection,
 )
@@ -86,19 +86,9 @@ class ReportTest(unittest.TestCase):
         for unwanted in ("triage", "findings", "Counter-evidence", "Missing checks", "first seen", "rate"):
             self.assertNotIn(unwanted, rendered)
 
-    def test_markdown_uses_readable_angle_brackets_and_balanced_unknowns(self):
+    def test_markdown_uses_readable_angle_brackets(self):
         self.assertEqual(r"\<n\>", markdown_escape("<n>"))
         self.assertEqual("`<n>`", markdown_code("<n>"))
-        values = [
-            {"component": "kernel", "count": 100 - index, "fingerprint": "k{0}".format(index)}
-            for index in range(10)
-        ] + [
-            {"component": "coredns", "count": 50, "fingerprint": "dns"},
-        ]
-        selected, omitted = _select_unknown_fingerprints(values, limit=20, per_component=5)
-        self.assertEqual(5, sum(item["component"] == "kernel" for item in selected))
-        self.assertEqual(1, sum(item["component"] == "coredns" for item in selected))
-        self.assertEqual(5, omitted)
 
     def test_non_collector_rules_declare_coverage_requirements(self):
         expected = {rule_id for rule_id in RULE_CATALOG if not rule_id.startswith("collector.")}
@@ -202,7 +192,19 @@ class ReportTest(unittest.TestCase):
                         "cgroup": {"status": "disabled"},
                         "service_states": {"kubelet.service": {"status": "collected", "properties": {"ActiveState": "active"}}},
                     },
-                    "commands": [],
+                    "commands": [
+                        {
+                            "id": "journal_services_current",
+                            "status": "collected",
+                            "stdout": json.dumps(
+                                {
+                                    "MESSAGE": "opaque-unclassified-marker-7391",
+                                    "_SYSTEMD_UNIT": "demo.service",
+                                    "__REALTIME_TIMESTAMP": "1767225600000000",
+                                }
+                            ),
+                        }
+                    ],
                     "pod_logs": {"status": "truncated", "entries": []},
                 },
             )
@@ -266,6 +268,8 @@ class ReportTest(unittest.TestCase):
             self.assertIn("Наиболее вероятные объяснения", markdown)
             self.assertIn("Причинный граф", markdown)
             self.assertIn("Состояние:", markdown)
+            self.assertIn("Сохранено неизвестных шаблонов: 1", markdown)
+            self.assertNotIn("opaque-unclassified-marker", markdown)
             for unwanted in ("Rule ID:", "Evidence:", "Counter-evidence:", "Missing checks:", "## Findings", "ledger", "coverage"):
                 self.assertNotIn(unwanted, markdown)
 

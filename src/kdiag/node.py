@@ -318,16 +318,54 @@ def _project_cilium_services(record):
         projected["error"] = "Cilium returned malformed service JSON"
         projected["stdout"] = ""
         return projected
-    values = document if isinstance(document, list) else (document.get("services", []) if isinstance(document, dict) else [])
+    if isinstance(document, list):
+        values = document
+    elif isinstance(document, dict) and isinstance(document.get("services"), list):
+        values = document["services"]
+    else:
+        projected = dict(record)
+        projected["status"] = "malformed"
+        projected["error"] = "Cilium service JSON has an unsupported top-level schema"
+        projected["stdout"] = ""
+        return projected
     services = []
-    for value in values[:10000] if isinstance(values, list) else []:
-        frontend = value.get("frontend-address") or value.get("frontendAddress") or value.get("frontend") or {}
-        backends = value.get("backend-addresses") or value.get("backendAddresses") or value.get("backends") or []
+    invalid_services = 0
+    for value in values[:10000]:
+        if not isinstance(value, dict):
+            invalid_services += 1
+            continue
+        spec = value.get("spec") if isinstance(value.get("spec"), dict) else {}
+        status = value.get("status") if isinstance(value.get("status"), dict) else {}
+        realized = status.get("realized") if isinstance(status.get("realized"), dict) else {}
+        if "spec" in value or "status" in value:
+            # cilium-dbg exports API Service models. The CLI table and dataplane
+            # state are based on status.realized, not on the requested spec.
+            frontend = realized.get("frontend-address") or realized.get("frontendAddress") or {}
+            backends = realized.get("backend-addresses") or realized.get("backendAddresses") or []
+            flags = spec.get("flags") if isinstance(spec.get("flags"), dict) else {}
+            service_id = realized.get("id", spec.get("id"))
+            namespace = str(flags.get("namespace") or "")
+            service_name = str(flags.get("name") or "")
+            name = "/".join(part for part in (namespace, service_name) if part)
+            service_type = flags.get("type")
+        else:
+            # Retain compatibility with the old compact projection and older
+            # Cilium JSON layouts used by existing collections.
+            frontend = value.get("frontend-address") or value.get("frontendAddress") or value.get("frontend") or {}
+            backends = value.get("backend-addresses") or value.get("backendAddresses") or value.get("backends") or []
+            service_id = value.get("id")
+            name = str(value.get("name") or "")
+            service_type = value.get("type")
+        if not isinstance(frontend, dict) or "ip" not in frontend or "port" not in frontend:
+            invalid_services += 1
+            continue
+        if not isinstance(backends, list):
+            backends = []
         services.append(
             {
-                "id": value.get("id"),
-                "name": str(value.get("name") or "")[:512],
-                "type": value.get("type"),
+                "id": service_id,
+                "name": name[:512],
+                "type": service_type,
                 "frontend": {key: frontend.get(key) for key in ("ip", "port", "protocol", "scope") if key in frontend},
                 "backends": [
                     {key: backend.get(key) for key in ("ip", "port", "protocol", "state") if key in backend}
@@ -338,7 +376,15 @@ def _project_cilium_services(record):
         )
     projected = dict(record)
     projected["stdout"] = json.dumps({"services": services}, ensure_ascii=False, separators=(",", ":"))
-    projected["truncated"] = len(values) > len(services) if isinstance(values, list) else False
+    projected["truncated"] = len(values) > 10000
+    if invalid_services:
+        projected["status"] = "malformed"
+        projected["error"] = "Cilium service JSON has {0} entries without a realized frontend; comparison skipped".format(
+            invalid_services
+        )
+    elif projected["truncated"]:
+        projected["status"] = "truncated"
+        projected["error"] = "Cilium service JSON exceeds the 10000-entry projection limit; comparison skipped"
     return projected
 
 

@@ -478,6 +478,50 @@ class RulesTest(unittest.TestCase):
         findings = evaluate_rules({"nodes": []}, {"node-1": snapshot}, kubernetes)
         self.assertIn("cilium.service_frontend_missing", {item["rule_id"] for item in findings})
 
+    def test_invalid_legacy_cilium_projection_does_not_report_every_service_missing(self):
+        snapshot = node_snapshot("6.1")
+        snapshot["commands"] = [
+            {
+                "id": "cilium_debug_services",
+                "status": "collected",
+                "stdout": '{"services":[{"id":1,"frontend":{}},{"id":2,"frontend":{}}]}',
+            }
+        ]
+        kubernetes = {
+            "sources": {
+                "services": {
+                    "status": "collected",
+                    "data": {
+                        "items": [
+                            {
+                                "metadata": {"namespace": "demo", "name": "api"},
+                                "spec": {"type": "ClusterIP", "clusterIP": "10.0.0.1", "ports": [{"port": 443}]},
+                            }
+                        ]
+                    },
+                }
+            }
+        }
+        findings = evaluate_rules({"nodes": []}, {"node-1": snapshot}, kubernetes)
+        self.assertNotIn("cilium.service_frontend_missing", {item["rule_id"] for item in findings})
+
+    def test_cilium_missing_frontend_summary_is_bounded(self):
+        snapshot = node_snapshot("6.1")
+        snapshot["commands"] = [{"id": "cilium_debug_services", "status": "collected", "stdout": '{"services":[]}'}]
+        services = [
+            {
+                "metadata": {"namespace": "demo", "name": "service-{0:03d}".format(index)},
+                "spec": {"type": "ClusterIP", "clusterIP": "10.0.0.{0}".format(index + 1), "ports": [{"port": 443}]},
+            }
+            for index in range(50)
+        ]
+        kubernetes = {"sources": {"services": {"status": "collected", "data": {"items": services}}}}
+        findings = evaluate_rules({"nodes": []}, {"node-1": snapshot}, kubernetes)
+        finding = next(item for item in findings if item["rule_id"] == "cilium.service_frontend_missing")
+        self.assertIn("отсутствует 50", finding["summary"])
+        self.assertIn("и ещё 45", finding["summary"])
+        self.assertLess(len(finding["summary"]), 500)
+
     def test_statefulset_revision_drift_and_active_job_retry_are_not_failures(self):
         kubernetes = {
             "sources": {

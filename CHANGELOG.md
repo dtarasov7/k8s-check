@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-08-28
+
+### Fixed
+
+- The `cilium-dbg service list --output json` projection now reads actual Cilium 1.17 frontends from `status.realized`. Unknown, partial, or truncated JSON blocks comparison, so a non-empty map can no longer become a false report that every ClusterIP is absent.
+- The Cilium finding is bounded to counts and a few examples instead of repeating the complete Service list for every node; old collections with empty frontend projections also fail closed.
+- Routine Deckhouse startup, successful certificate issuance, kubeforward, kubeclient/PodCIDR, and DNS-cleaner messages are classified offline. Go stack traces receive a separate explanation and recommendations to inspect context and Pod state.
+- Unknown templates without a verified interpretation are no longer dumped into Markdown; the complete bounded set remains in `normalized-events.json.gz`.
+
 ## [0.11.0] - 2026-08-27
 
 ### Added

@@ -1065,7 +1065,7 @@ def _cilium_dns_dataplane_findings(node_snapshots, kubernetes, normalized):
     if _source_collected(kubernetes, "pods") and cilium_config.get("status") == "collected" and not kube_proxy_present and replacement in ("false", "disabled"):
         findings.append(_finding("cilium.kube_proxy_replacement_disabled", "critical", "Cilium kube-proxy replacement явно отключён", "kube-proxy Pods отсутствуют, kube-proxy-replacement={0!r}.".format(replacement), ["cluster"], ["kubernetes.json.gz#sources.cilium_config", "kubernetes.json.gz#sources.pods"], "Проверить effective Cilium KubeProxyReplacement на каждом agent; изменение выполнять только по процедуре Cilium rollout.", causal_confidence="high", classification="fact"))
 
-    expected_frontends = []
+    expected_frontends = set()
     for service in _kube_items(kubernetes, "services"):
         spec = service.get("spec", {}) or {}
         if spec.get("type") == "ExternalName" or spec.get("clusterIP") in (None, "", "None"):
@@ -1074,7 +1074,7 @@ def _cilium_dns_dataplane_findings(node_snapshots, kubernetes, normalized):
         for ip in ips:
             for port in spec.get("ports", []) or []:
                 if ip and port.get("port") is not None:
-                    expected_frontends.append((str(ip), int(port["port"]), _object_target(service)))
+                    expected_frontends.add((str(ip), int(port["port"]), _object_target(service)))
     missing_by_node = {}
     service_evidence = []
     for node_name, snapshot in node_snapshots.items():
@@ -1086,21 +1086,49 @@ def _cilium_dns_dataplane_findings(node_snapshots, kubernetes, normalized):
                 document = value
                 command_id = candidate
                 break
-        if not document:
+        if document is None:
             continue
         actual = set()
+        invalid_entries = 0
         for service in document.get("services", []):
+            if not isinstance(service, dict):
+                invalid_entries += 1
+                continue
             frontend = service.get("frontend", {}) or {}
             try:
-                actual.add((str(frontend.get("ip")), int(frontend.get("port"))))
+                ip = frontend.get("ip")
+                port = frontend.get("port")
+                if not ip or port is None:
+                    raise ValueError("missing frontend")
+                actual.add((str(ip), int(port)))
             except (TypeError, ValueError):
-                continue
-        missing = [target for ip, port, target in expected_frontends if (ip, port) not in actual]
+                invalid_entries += 1
+        # Collections created by older kdiag versions can contain a non-empty
+        # Cilium list whose real status.realized frontends were projected as
+        # empty dictionaries. Such data cannot prove that every Service is
+        # absent, so fail closed instead of producing a cluster-wide alert.
+        if invalid_entries:
+            continue
+        missing = [target for ip, port, target in sorted(expected_frontends) if (ip, port) not in actual]
         if missing:
-            missing_by_node[node_name] = sorted(set(missing))[:100]
+            missing_by_node[node_name] = {
+                "frontend_count": len(missing),
+                "services": sorted(set(missing)),
+            }
             service_evidence.append("node-{0}.json.gz#commands.{1}".format(node_name, command_id))
     if missing_by_node:
-        findings.append(_finding("cilium.service_frontend_missing", "warning", "Cilium service map не содержит ожидаемые ClusterIP frontends", "; ".join("{0}: {1}".format(name, ",".join(values)) for name, values in sorted(missing_by_node.items())), list(missing_by_node), service_evidence + ["kubernetes.json.gz#sources.services"], "Повторить snapshot для исключения краткого рассогласования и проверить cilium-dbg service list, agent status и Kubernetes watch errors.", causal_confidence="medium", alternatives=["snapshot попал в момент обновления Service", "CLI показал неполный service scope"], classification="hypothesis"))
+        missing_total = sum(value["frontend_count"] for value in missing_by_node.values())
+        examples = []
+        for name, value in sorted(missing_by_node.items())[:3]:
+            sample = value["services"][:5]
+            suffix = " (и ещё {0})".format(len(value["services"]) - len(sample)) if len(value["services"]) > len(sample) else ""
+            examples.append("{0}: {1}{2}".format(name, ", ".join(sample), suffix))
+        summary = "На {0} узл. отсутствует {1} ожидаемых frontend-записей. Примеры: {2}.".format(
+            len(missing_by_node),
+            missing_total,
+            "; ".join(examples),
+        )
+        findings.append(_finding("cilium.service_frontend_missing", "warning", "Cilium service map не содержит ожидаемые ClusterIP frontends", summary, list(missing_by_node), service_evidence + ["kubernetes.json.gz#sources.services"], "Повторить snapshot для исключения краткого рассогласования и проверить cilium-dbg service list, agent status и Kubernetes watch errors.", causal_confidence="medium", alternatives=["snapshot попал в момент обновления Service", "CLI показал неполный service scope"], classification="hypothesis"))
     return findings
 
 
