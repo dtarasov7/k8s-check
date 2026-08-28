@@ -2,7 +2,7 @@
 
 ## 1. Purpose and scope
 
-<code>kdiag 0.11.1</code> creates a one-time diagnostic snapshot of a Kubernetes cluster, performs deterministic fully offline analysis, and can compare a collection with a separately approved baseline. Each run explicitly selects either a routine health check or incident analysis in a defined time window. Its current diagnostic compatibility scope is vanilla Kubernetes and Deckhouse CSE Pro 1.74 with Kubernetes 1.24–1.31, up to 20 nodes and about 1,000 Pods. This describes evidence/rule compatibility, not lifecycle support.
+<code>kdiag 0.11.2</code> creates a one-time diagnostic snapshot of a Kubernetes cluster, performs deterministic fully offline analysis, and can compare a collection with a separately approved baseline. Each run explicitly selects either a routine health check or incident analysis in a defined time window. Its current diagnostic compatibility scope is vanilla Kubernetes and Deckhouse CSE Pro 1.74 with Kubernetes 1.24–1.31, up to 20 nodes and about 1,000 Pods. This describes evidence/rule compatibility, not lifecycle support.
 
 The program runs on a separate management server. It connects to every node over SSH, runs read-only inspection through non-interactive sudo, and queries the Kubernetes API using a dedicated kubeconfig. Prometheus is optional: the snapshot still works when Prometheus or the entire Kubernetes API is unavailable.
 
@@ -407,7 +407,7 @@ For Deckhouse authentication config, node collection records only file metadata 
 
 Current-boot journals are requested newest-first. If `collection.max_command_bytes` truncates them, the newest incident-near records are retained. Increase that limit or reduce `collection.since_hours` when the report shows truncation.
 
-Unknown fingerprints without verified semantics do not receive an invented recommendation and are not printed line by line in the main Markdown. The report shows only the retained unknown-template count and a reference to `normalized-events.json.gz`; the complete bounded set, examples, and approximate counts remain in that confidential machine file for later analysis and catalogue updates.
+Already classified routine and observe fingerprints are shown in a compact table with component, meaning, frequency, and the condition that requires action, so they no longer look like unknown errors. For genuinely unknown fingerprints the program does not invent semantics: Markdown shows at most five frequent templates from different components as a manual-classification queue and gives a shared recommendation to inspect source context only when the template coincides with active degradation. The complete bounded set, examples, and approximate counts remain in confidential `normalized-events.json.gz`; after a catalogue rule is added, rerunning `report` turns a matching template into an analyzed card without a new snapshot.
 
 ~~~bash
 python3.8 dist/kdiag.pyz report /var/lib/kdiag/COLLECTION_ID

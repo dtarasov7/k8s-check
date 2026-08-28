@@ -627,6 +627,96 @@ def _report_message_insights(values):
     ]
 
 
+def _non_problem_message_insights(values):
+    return [
+        value for value in (values or [])
+        if value.get("category") in ("routine", "observe")
+        and value.get("decision_state") != "investigate"
+    ]
+
+
+def _render_non_problem_message_insights(lines, values, limit=30):
+    insights = _non_problem_message_insights(values)
+    if not insights:
+        return
+    lines.extend(
+        [
+            "## Проанализированные сообщения без подтверждённой проблемы",
+            "",
+            "Это не сырые строки и не ошибки: каталог уже определил их смысл. Таблица показывает операторский вывод и условие, при котором сообщение всё-таки следует проверять.",
+            "",
+            "| Итог | Компонент | Что означает | Частота | Когда требуется действие |",
+            "|---|---|---|---:|---|",
+        ]
+    )
+    for insight in insights[:limit]:
+        occurrence = insight.get("occurrence_range") or {}
+        minimum = int(occurrence.get("minimum") or 0)
+        maximum = int(occurrence.get("maximum") or minimum)
+        frequency = str(maximum) if insight.get("count_is_exact") or minimum == maximum else "{0}..{1}".format(minimum, maximum)
+        result = "штатное" if insight.get("category") == "routine" else "наблюдение"
+        lines.append(
+            "| {0} | {1} | {2} | {3} | {4} |".format(
+                markdown_escape(result),
+                markdown_code(insight.get("component") or "неизвестно"),
+                markdown_escape(_bounded_report_text(insight.get("title") or insight.get("insight_id") or "сообщение")),
+                markdown_escape(frequency),
+                markdown_escape(_bounded_report_text(insight.get("decision_condition") or "действие не требуется")),
+            )
+        )
+    if len(insights) > limit:
+        lines.append("| информация | — | В Markdown опущено сообщений: {0} | — | Полный набор находится в `normalized-events.json.gz`. |".format(len(insights) - limit))
+    lines.append("")
+
+
+def _select_unknown_fingerprints(values, limit=5):
+    grouped = {}
+    for item in values or []:
+        grouped.setdefault(str(item.get("component") or "unknown"), []).append(item)
+    ranked = []
+    for component, items in grouped.items():
+        ordered = sorted(items, key=lambda item: (-int(item.get("count") or 0), str(item.get("fingerprint") or "")))
+        if ordered:
+            ranked.append((-int(ordered[0].get("count") or 0), component, ordered[0]))
+    selected = [item for _count, _component, item in sorted(ranked)[:limit]]
+    return selected, max(0, len(values or []) - len(selected))
+
+
+def _render_unknown_fingerprint_review(lines, values, limit=5):
+    selected, omitted = _select_unknown_fingerprints(values, limit=limit)
+    if not selected:
+        return
+    lines.extend(
+        [
+            "### Сообщения, для которых пока нет правила",
+            "",
+            "Эти шаблоны сохранены для ручной классификации и улучшения каталога. Они не считаются ошибками: без подтверждённой семантики программа не придумывает причину или специальную рекомендацию.",
+            "",
+        ]
+    )
+    for item in selected:
+        occurrence = item.get("occurrence_range") or {}
+        minimum = int(occurrence.get("minimum", item.get("count")) or 0)
+        maximum = int(occurrence.get("maximum", item.get("count")) or minimum)
+        frequency = str(maximum) if minimum == maximum else "{0}..{1}".format(minimum, maximum)
+        lines.append(
+            "- {0}, появлений {1}: {2}".format(
+                markdown_code(item.get("component") or "unknown"),
+                markdown_escape(frequency),
+                markdown_code(_bounded_report_text(item.get("template"))),
+            )
+        )
+    if omitted:
+        lines.append("- Ещё шаблонов только в `normalized-events.json.gz`: {0}.".format(omitted))
+    lines.extend(
+        [
+            "",
+            "Рекомендация: не менять кластер только на основании этого списка. Если шаблон совпадает по времени с активной деградацией, проверить сохранённые примеры и исходный evidence; повторяющийся понятный шаблон добавить в локальный каталог вместе с тестом, объяснением и условием действия.",
+            "",
+        ]
+    )
+
+
 def _render_message_insights(lines, values, limit=30):
     insights = _report_message_insights(values)
     if not insights:
@@ -1135,6 +1225,7 @@ def build_report(collection_dir):
             lines.append("")
     stats = normalized.get("stats", {})
     _render_message_insights(lines, report_message_insights)
+    _render_non_problem_message_insights(lines, normalized.get("message_insights", []))
     lines.extend(
         [
             "## Обработка и сопоставление журналов",
@@ -1154,14 +1245,7 @@ def build_report(collection_dir):
             "",
         ]
     )
-    unknown_count = len(normalized.get("unknown_fingerprints", []))
-    if unknown_count:
-        lines.extend(
-            [
-                "Сохранено неизвестных шаблонов: {0}. Их тексты не выводятся в основной отчёт без проверенной интерпретации и рекомендации. Полный ограниченный набор сохранён в `normalized-events.json.gz`; автоматически классифицированные сообщения, для которых требуется действие, показаны выше отдельными карточками.".format(unknown_count),
-                "",
-            ]
-        )
+    _render_unknown_fingerprint_review(lines, normalized.get("unknown_fingerprints", []))
     correlations = normalized.get("correlations", [])
     if correlations:
         lines.extend(["## Совпадения признаков по времени", "", "| Эпизод | Тип | Объект | Начало | Конец | Длительность, с |", "|---|---|---|---|---|---:|"])

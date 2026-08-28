@@ -10,6 +10,8 @@ from kdiag.report import (
     _coverage_display_rows,
     _rule_ledger,
     _render_message_insights,
+    _render_non_problem_message_insights,
+    _render_unknown_fingerprint_review,
     build_report,
     load_collection,
 )
@@ -89,6 +91,49 @@ class ReportTest(unittest.TestCase):
     def test_markdown_uses_readable_angle_brackets(self):
         self.assertEqual(r"\<n\>", markdown_escape("<n>"))
         self.assertEqual("`<n>`", markdown_code("<n>"))
+
+    def test_report_summarizes_classified_routine_and_bounds_unknown_review(self):
+        lines = []
+        _render_non_problem_message_insights(
+            lines,
+            [
+                {
+                    "category": "routine",
+                    "decision_state": "routine",
+                    "component": "cert-manager",
+                    "title": "Сертификат успешно выдан",
+                    "count_is_exact": True,
+                    "occurrence_range": {"minimum": 12, "maximum": 12},
+                    "decision_condition": "Проверять только при неготовом потребителе TLS.",
+                },
+                {
+                    "category": "actionable",
+                    "decision_state": "monitor",
+                    "component": "coredns",
+                    "title": "Stack trace",
+                },
+            ],
+        )
+        _render_unknown_fingerprint_review(
+            lines,
+            [
+                {
+                    "component": "component-{0}".format(index),
+                    "template": "unknown template {0}".format(index),
+                    "count": 10 - index,
+                    "occurrence_range": {"minimum": 10 - index, "maximum": 10 - index},
+                }
+                for index in range(7)
+            ],
+        )
+        rendered = "\n".join(lines)
+        self.assertIn("Проанализированные сообщения без подтверждённой проблемы", rendered)
+        self.assertIn("Сертификат успешно выдан", rendered)
+        self.assertIn("Проверять только при неготовом потребителе TLS", rendered)
+        self.assertNotIn("Stack trace", rendered)
+        self.assertEqual(5, rendered.count("unknown template"))
+        self.assertIn("Ещё шаблонов только в `normalized-events.json.gz`: 2", rendered)
+        self.assertIn("не менять кластер только на основании этого списка", rendered)
 
     def test_non_collector_rules_declare_coverage_requirements(self):
         expected = {rule_id for rule_id in RULE_CATALOG if not rule_id.startswith("collector.")}
@@ -268,8 +313,8 @@ class ReportTest(unittest.TestCase):
             self.assertIn("Наиболее вероятные объяснения", markdown)
             self.assertIn("Причинный граф", markdown)
             self.assertIn("Состояние:", markdown)
-            self.assertIn("Сохранено неизвестных шаблонов: 1", markdown)
-            self.assertNotIn("opaque-unclassified-marker", markdown)
+            self.assertIn("Сообщения, для которых пока нет правила", markdown)
+            self.assertIn("opaque-unclassified-marker", markdown)
             for unwanted in ("Rule ID:", "Evidence:", "Counter-evidence:", "Missing checks:", "## Findings", "ledger", "coverage"):
                 self.assertNotIn(unwanted, markdown)
 

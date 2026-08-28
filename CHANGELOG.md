@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-08-28
+
+### Changed
+
+- Markdown now includes a compact table of analyzed routine/observe messages with their meaning, frequency, and action condition, so known records neither disappear silently nor look like errors.
+- At most five genuinely unknown templates from different components remain visible for manual classification. They are explicitly not findings; the complete set and examples stay in `normalized-events.json.gz`, and rerunning `report` applies newly added rules without another snapshot.
+
 ## [0.11.1] - 2026-08-28
 
 ### Fixed
