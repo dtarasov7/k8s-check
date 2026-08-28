@@ -2,11 +2,11 @@
 
 ## 1. Purpose and scope
 
-<code>kdiag 0.9.2</code> creates a one-time emergency snapshot of a Kubernetes cluster and performs deterministic, fully offline analysis. Its current diagnostic compatibility scope is vanilla Kubernetes and Deckhouse CSE Pro 1.74 with Kubernetes 1.24–1.31, up to 20 nodes and about 1,000 Pods. This describes evidence/rule compatibility, not lifecycle support.
+<code>kdiag 0.11.0</code> creates a one-time diagnostic snapshot of a Kubernetes cluster, performs deterministic fully offline analysis, and can compare a collection with a separately approved baseline. Each run explicitly selects either a routine health check or incident analysis in a defined time window. Its current diagnostic compatibility scope is vanilla Kubernetes and Deckhouse CSE Pro 1.74 with Kubernetes 1.24–1.31, up to 20 nodes and about 1,000 Pods. This describes evidence/rule compatibility, not lifecycle support.
 
 The program runs on a separate management server. It connects to every node over SSH, runs read-only inspection through non-interactive sudo, and queries the Kubernetes API using a dedicated kubeconfig. Prometheus is optional: the snapshot still works when Prometheus or the entire Kubernetes API is unavailable.
 
-The current release implements only the **one-time emergency snapshot and inventory** stage. Periodic baseline collection and continuous Kubernetes/log watching are future stages.
+The current release implements the **one-time diagnostic snapshot and inventory** stage, including separate check and incident modes. Periodic baseline collection and continuous Kubernetes/log watching are future stages.
 
 No LLM, Internet connection, external Python package, agent, DaemonSet, or database is required. Analysis is performed by a versioned rule pack. An optional command prepares minimized LLM input after collection; it does not affect the deterministic report. The tool does not update Kubernetes, repair the cluster, restart services, change sysctl, or mutate etcd.
 
@@ -34,9 +34,9 @@ The workflow is:
 1. Validate configuration, disk reserve, inventory, SSH, sudo, and API access.
 2. Collect bounded node and Kubernetes evidence.
 3. Normalize logs and structured Kubernetes states.
-4. Correlate related records in a 15-minute window.
-5. Run deterministic rules and create JSON and Markdown reports.
-6. Generate a manifest with file sizes and SHA-256 hashes.
+4. Correlate related records and, in incident mode, constrain analysis to the explicit window and request fixed Prometheus range diagnostics.
+5. Run deterministic rules, assign finding states and roles, build the causal graph, and rank possible causes.
+6. Create JSON and Markdown reports and generate a manifest with file sizes and SHA-256 hashes.
 
 A node failure or unavailable API normally produces a **partial snapshot** instead of discarding evidence from healthy sources.
 
@@ -217,7 +217,17 @@ The inventory alias does not have to equal <code>metadata.name</code> of the Kub
 
 Copy <code>config/snapshot.example.json</code> to an environment-specific file. The format has <code>schema_version: 1</code>. Invalid values fail preflight with exit code 2.
 
-### 8.1 Collection
+### 8.1 Analysis purpose
+
+| Key | Default | Meaning |
+|---|---:|---|
+| <code>analysis.purpose</code> | check | <code>check</code> for a routine health check or <code>incident</code> for incident analysis. |
+| <code>analysis.incident_start</code> | null | Required incident start in ISO-8601 with a UTC offset. |
+| <code>analysis.incident_end</code> | null | Incident end; when only start is supplied by CLI, current time is used. |
+
+Window values must be null in check mode. An incident window cannot exceed 30 days. The relative <code>--incident-since 2h</code> form is available only in CLI.
+
+### 8.2 Collection
 
 | Key | Default | Meaning |
 |---|---:|---|
@@ -233,7 +243,7 @@ Copy <code>config/snapshot.example.json</code> to an environment-specific file. 
 | <code>collection.collect_etcd</code> | true | Enable read-only local etcd health/status/alarm collection. |
 | <code>collection.collect_cgroup</code> | true | Direct cgroup facts/process mappings and related cgroup events/findings. |
 
-### 8.2 SSH
+### 8.3 SSH
 
 | Key | Default | Meaning |
 |---|---:|---|
@@ -242,7 +252,7 @@ Copy <code>config/snapshot.example.json</code> to an environment-specific file. 
 | <code>ssh.user</code> | null | Optional global user override. |
 | <code>ssh.port</code> | 22 | Optional global port override. |
 
-### 8.3 Kubernetes
+### 8.4 Kubernetes
 
 | Key | Default | Meaning |
 |---|---:|---|
@@ -259,7 +269,7 @@ Copy <code>config/snapshot.example.json</code> to an environment-specific file. 
 | <code>kubernetes.max_log_pods</code> | 100 | Maximum Pods selected for API logs. |
 | <code>kubernetes.max_log_bytes</code> | 33554432 | Aggregate API Pod-log limit. |
 
-### 8.4 Prometheus
+### 8.5 Prometheus
 
 | Key | Default | Meaning |
 |---|---:|---|
@@ -269,9 +279,9 @@ Copy <code>config/snapshot.example.json</code> to an environment-specific file. 
 | <code>prometheus.timeout_seconds</code> | 3 | Short timeout so it cannot block emergency work. |
 | <code>prometheus.max_response_bytes</code> | 1048576 | Maximum response size. |
 
-Prometheus failure is non-fatal.
+Prometheus failure is non-fatal. Check mode collects alerts and runtimeinfo. Incident mode additionally runs six fixed <code>query_range</code> diagnostics: API 5xx, API P99 latency, etcd WAL fsync P99, aggregate container restarts, container network errors, and CPU iowait/steal. Series, samples, and responses are bounded; arbitrary configured PromQL is not executed.
 
-### 8.5 Initial 5 GiB sizing
+### 8.6 Initial 5 GiB sizing
 
 Default compressed bundle ceilings for 20 nodes plus Kubernetes total about 768 MiB, before reports and working overhead. They are safety ceilings, not expected usage. Start with defaults and examine <code>manifest.json</code>. If useful evidence is repeatedly truncated, increase only the relevant cap and discuss central expansion. Do not remove the 1 GiB reserve to force a run onto a nearly full filesystem.
 
@@ -298,6 +308,22 @@ python3.8 dist/kdiag.pyz snapshot \
   --kubeconfig /secure/kdiag.kubeconfig \
   --output-dir /var/lib/kdiag
 ~~~
+
+Routine checks use <code>--purpose check</code> by default. Incident analysis requires an explicit window:
+
+~~~bash
+python3.8 dist/kdiag.pyz snapshot -i inventory.ini -g k8s_nodes \
+  --config config/snapshot.json --purpose incident \
+  --incident-start 2026-08-27T10:00:00Z \
+  --incident-end 2026-08-27T12:00:00Z \
+  --prometheus-url http://prometheus:9090 -o /var/lib/kdiag
+
+python3.8 dist/kdiag.pyz snapshot -i inventory.ini -g k8s_nodes \
+  --config config/snapshot.json --purpose incident \
+  --incident-since 2h -o /var/lib/kdiag
+~~~
+
+The absolute window is passed to node journalctl; Kubernetes Pod logs use <code>--since-time</code>; Prometheus range queries use the same start and end. Because kubectl logs has no end option and Kubernetes Events may contain older records, normalization excludes exact-timestamp records outside the window. Records without reliable timestamps are not used for causal time correlation.
 
 By default, <code>summary</code> progress is written to <code>stderr</code>: phases, start and completion of every inventory node, Kubernetes API, Prometheus, and report generation. <code>detail</code> also lists node evidence categories and the result of each Kubernetes API source. <code>stdout</code> still contains only the collection path, preserving machine parsing:
 
@@ -360,13 +386,18 @@ Each run creates <code>&lt;output&gt;/&lt;collection-id&gt;/</code>:
 | <code>normalized-events.json.gz</code> | Normalized records, offline message insights, fingerprints, and correlations; confidential. |
 | <code>facts.json</code> | Derived facts used by rules. |
 | <code>findings.json</code> | Machine-readable findings. |
+| <code>causal-graph.json</code> | Bounded topology, causal links, range signals, and ranked hypotheses. |
 | <code>report.json</code> | Combined machine-readable report. |
 | <code>report.md</code> | Primary operator report. |
+| <code>baseline-comparison.json</code> | Machine-readable baseline differences; present only after comparison. |
+| <code>baseline-comparison.md</code> | Russian explanation and recommended actions; present only after comparison. |
 | <code>manifest.json</code> | File sizes and SHA-256 hashes. |
 
 Inventory aliases and Kubernetes Node names may differ. Unambiguous hostname/FQDN and unique short-name matches are canonicalized to the Kubernetes Node name for Node-scoped correlation; ambiguous identities remain visible as a mismatch.
 
-Completeness is recorded for every node command, node Pod-log group, Kubernetes source, and Kubernetes log entry. A collected parent bundle does not hide an inner `failed`, `timeout`, or `truncated` check. `facts.json`, `findings.json`, and `report.json` retain stable machine statuses. The Markdown report translates them, groups identical node failures, and omits the full per-rule table. Each rule declares its own source requirements, so a failed Events query affects event-dependent rules but not a Node-condition rule whose Nodes source was collected.
+Completeness is recorded for every node command, node Pod-log group, Kubernetes source, Prometheus query, and Kubernetes log entry. A collected parent bundle does not hide an inner `failed`, `timeout`, or `truncated` check. `facts.json`, `findings.json`, and `report.json` retain stable machine statuses. Each finding has an `active`, `resolved`, or `unknown` state and a `possible_cause`, `consequence`, or `configuration_risk` role. A historical log line without confirmation from current structured state is not declared active. Check-mode Markdown hides resolved findings but keeps them in JSON. Each rule declares its own source requirements, so a failed Events query affects event-dependent rules but not a Node-condition rule whose Nodes source was collected.
+
+The causal graph links Node → Pod → workload/EndpointSlice → Service and CSI → PV → PVC → Pod, plus etcd/API server/runtime/Cilium dependencies. A `may_explain` link is added only when a consequence object is reachable from a possible-cause object. Ranking uses severity, state, role, confidence, downstream consequences, counter-evidence, and missing checks. The score is an investigation priority, not a probability or proof of root cause.
 
 The Markdown result summary explains why checks could not run and how many rules depend on each missing source; the complete technical list remains in `report.json`. If Kubernetes collection was intentionally disabled, dependent rules are marked not applicable. Even an unreachable Kubernetes bundle is read to retain its per-source failure details.
 
@@ -382,6 +413,40 @@ The remaining unknown-fingerprint section is also informational. It shows a comp
 python3.8 dist/kdiag.pyz report /var/lib/kdiag/COLLECTION_ID
 python3.8 dist/kdiag.pyz verify /var/lib/kdiag/COLLECTION_ID
 ~~~
+
+### 10.1 Creating, approving, and using a baseline
+
+A baseline is a separate document, not a collector mode. A successful snapshot is never promoted automatically. Create a candidate only from a completed collection with a valid <code>manifest.json</code>, and store it outside the collection directory:
+
+~~~bash
+python3.8 dist/kdiag.pyz baseline create /var/lib/kdiag/COLLECTION_ID \
+  --name production --output /secure/baseline-candidate.json
+~~~
+
+The candidate has a stable profile and profile SHA-256, but no approval, so comparison rejects it. Approval is a separate action with a required author and a new output file:
+
+~~~bash
+python3.8 dist/kdiag.pyz baseline approve /secure/baseline-candidate.json \
+  --approved-by operator@example --output /secure/baseline.json
+~~~
+
+Approval is blocked by an active critical finding or incomplete required source. A documented exception requires explicit <code>--override-unsafe</code>; the flag and exact reasons are retained. Existing output is not overwritten. The approved JSON has a profile SHA-256 and a SHA-256 over the complete canonical document except the <code>document_sha256</code> field itself. Both hashes and the canonical byte representation are checked before comparison.
+
+~~~bash
+python3.8 dist/kdiag.pyz compare /var/lib/kdiag/NEW_COLLECTION_ID \
+  --baseline /secure/baseline.json
+~~~
+
+The result classifies <code>new_problem</code>, <code>removed</code>, <code>added</code>, <code>changed</code>, <code>resolved</code>, and <code>unverifiable</code>. If a current source is unavailable, objects from that baseline source are not reported as removed. JSON and Russian Markdown outputs are added to the collection and its manifest is updated.
+
+The profile includes node roles, versions, OS, architecture and cgroups; Services and stable workloads; StorageClass/CSI; vanilla/Deckhouse control-plane, etcd and DNS topology; Cilium configuration; expected system components/images; configuration SHA-256 values; and active findings aggregated by rule ID. It excludes timestamps, UIDs, IPs/PIDs, Lease times, log lines, Jobs/ReplicaSets, and generated Pod suffixes. A new snapshot can invoke the same comparison implementation after collection:
+
+~~~bash
+python3.8 dist/kdiag.pyz snapshot -i inventory.ini --config config/snapshot.json \
+  --baseline /secure/baseline.json -o /var/lib/kdiag
+~~~
+
+The baseline remains a local file. There is no external storage or automatic norm learning; changing the norm requires a new create/approve cycle.
 
 ## 11. Interpretation, normalization, and correlation
 
@@ -707,7 +772,7 @@ The response is untrusted. The command preserves it unchanged, creates `response
 - Heavy-hitter counting may omit low-frequency unknown messages.
 - A 15-minute window can miss slow incidents or correlate coincidences.
 - Automated/synthetic tests do not replace a canary on the exact RED OS 7.x, kernel, runtime, Cilium, KESL, and Kubernetes builds.
-- Baseline and continuous watch modes are not in this release.
+- Continuous watch is not in this release; baseline comparison is explicit for one-time collections and never learns automatically.
 
 ## 17. Rule provenance and maintenance
 

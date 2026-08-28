@@ -218,12 +218,12 @@ def _root_disk():
     return {"total_bytes": usage.total, "used_bytes": usage.used, "free_bytes": usage.free}
 
 
-def _command_specs(since_hours):
+def _command_specs(since_hours, journal_since=None, journal_until=None):
     since = "{0} hours ago".format(since_hours)
     journal_units = []
     for unit in SERVICE_UNITS:
         journal_units.extend(["-u", unit])
-    return [
+    specifications = [
         ("uname", ["uname", "-a"], "internal"),
         ("installed_packages", ["rpm", "-qa", "--qf", "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\\n"], "internal"),
         ("dnf_history", ["dnf", "history", "list"], "internal"),
@@ -253,19 +253,25 @@ def _command_specs(since_hours):
         ("nft_ruleset", ["nft", "-j", "list", "ruleset"], "confidential"),
         ("iptables_rules", ["iptables-save"], "confidential"),
         ("journal_boots", ["journalctl", "--list-boots", "--no-pager"], "internal"),
-        (
-            "journal_services_current",
-            ["journalctl", "--no-pager", "--utc", "--reverse", "-o", "json", "--since", since] + journal_units,
-            "confidential",
-        ),
-        (
-            "journal_services_previous",
-            ["journalctl", "--no-pager", "--utc", "-o", "json", "-b", "-1", "-n", "2000"] + journal_units,
-            "confidential",
-        ),
-        ("journal_kernel_current", ["journalctl", "--no-pager", "--utc", "--reverse", "-o", "json", "-k", "--since", since], "confidential"),
-        ("journal_kernel_previous", ["journalctl", "--no-pager", "--utc", "-o", "json", "-k", "-b", "-1", "-n", "2000"], "confidential"),
     ]
+    if journal_since and journal_until:
+        window = ["--since", journal_since, "--until", journal_until]
+        specifications.extend(
+            [
+                ("journal_services_current", ["journalctl", "--no-pager", "--utc", "-o", "json"] + window + journal_units, "confidential"),
+                ("journal_kernel_current", ["journalctl", "--no-pager", "--utc", "-o", "json", "-k"] + window, "confidential"),
+            ]
+        )
+    else:
+        specifications.extend(
+            [
+                ("journal_services_current", ["journalctl", "--no-pager", "--utc", "--reverse", "-o", "json", "--since", since] + journal_units, "confidential"),
+                ("journal_services_previous", ["journalctl", "--no-pager", "--utc", "-o", "json", "-b", "-1", "-n", "2000"] + journal_units, "confidential"),
+                ("journal_kernel_current", ["journalctl", "--no-pager", "--utc", "--reverse", "-o", "json", "-k", "--since", since], "confidential"),
+                ("journal_kernel_previous", ["journalctl", "--no-pager", "--utc", "-o", "json", "-k", "-b", "-1", "-n", "2000"], "confidential"),
+            ]
+        )
+    return specifications
 
 
 def _project_cri_records(record, source_key):
@@ -985,11 +991,11 @@ def _pod_log_snapshot(namespaces, tail_bytes, total_bytes, max_files):
     return {"status": status, "entries": entries, "errors": errors, "bytes": consumed, "candidate_files": len(candidates)}
 
 
-def collect_node_snapshot(since_hours, timeout_seconds, max_command_bytes, system_namespaces, application_namespaces, pod_log_tail_bytes, pod_log_total_bytes, pod_log_max_files, collect_etcd=False, collect_cgroup=True):
+def collect_node_snapshot(since_hours, timeout_seconds, max_command_bytes, system_namespaces, application_namespaces, pod_log_tail_bytes, pod_log_total_bytes, pod_log_max_files, collect_etcd=False, collect_cgroup=True, journal_since=None, journal_until=None):
     started_at = utc_now()
     boot_start = _boot_id()
     commands = []
-    for check_id, argv, sensitivity in _command_specs(since_hours):
+    for check_id, argv, sensitivity in _command_specs(since_hours, journal_since, journal_until):
         record = run_check(check_id, argv, timeout_seconds, max_command_bytes, sensitivity=sensitivity)
         commands.append(_filtered_command(record))
     commands = _apply_cilium_fallback(
@@ -1009,7 +1015,12 @@ def collect_node_snapshot(since_hours, timeout_seconds, max_command_bytes, syste
         "started_at": started_at,
         "ended_at": utc_now(),
         "sensitivity": "confidential",
-        "options": {"collect_cgroup": collect_cgroup, "collect_etcd": collect_etcd},
+        "options": {
+            "collect_cgroup": collect_cgroup,
+            "collect_etcd": collect_etcd,
+            "journal_since": journal_since,
+            "journal_until": journal_until,
+        },
         "host": {
             "hostname": socket.gethostname(),
             "fqdn": socket.getfqdn(),

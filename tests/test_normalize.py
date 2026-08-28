@@ -110,6 +110,44 @@ class NormalizeTest(unittest.TestCase):
         self.assertEqual(1, normalized["stats"]["unknown_retained_fingerprints"])
         self.assertEqual(1, normalized["unknown_fingerprints"][0]["count"])
 
+    def test_incident_analysis_excludes_exact_events_outside_explicit_window(self):
+        kubernetes = {
+            "collected_at": "2026-08-27T13:00:00Z",
+            "sources": {
+                "nodes": {"data": {"items": []}},
+                "pods": {"data": {"items": []}},
+                "events": {"data": {"items": []}},
+            },
+            "logs": {
+                "entries": [
+                    {
+                        "namespace": "kube-system",
+                        "pod": "demo",
+                        "container": "demo",
+                        "text": (
+                            "2026-08-27T10:30:00Z connection refused inside window\n"
+                            "2026-08-27T12:30:00Z connection refused after window\n"
+                        ),
+                    }
+                ]
+            },
+        }
+        normalized = normalize_evidence(
+            {
+                "collection_id": "window",
+                "options": {
+                    "purpose": "incident",
+                    "incident_start": "2026-08-27T10:00:00Z",
+                    "incident_end": "2026-08-27T11:00:00Z",
+                },
+            },
+            {},
+            kubernetes,
+        )
+        self.assertEqual(1, len(normalized["events"]))
+        self.assertIn("inside window", normalized["events"][0]["message_excerpt"])
+        self.assertEqual(1, normalized["stats"]["incident_window_filtered_records"])
+
     def test_short_inventory_name_correlates_with_kubernetes_fqdn(self):
         journal = (FIXTURES / "journal-synthetic.jsonl").read_text(encoding="utf-8")
         kubernetes = json.loads((FIXTURES / "kubernetes-synthetic.json").read_text(encoding="utf-8"))

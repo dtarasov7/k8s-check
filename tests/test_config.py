@@ -80,6 +80,30 @@ class ConfigTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "prometheus"):
                     load_config(path)
 
+    def test_analysis_config_requires_explicit_incident_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "analysis": {
+                            "purpose": "incident",
+                            "incident_start": "2026-08-27T10:00:00Z",
+                            "incident_end": "2026-08-27T11:00:00Z",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(path)
+        self.assertEqual("incident", config["analysis"]["purpose"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({"analysis": {"purpose": "incident"}}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "incident window"):
+                load_config(path)
+
 
 if __name__ == "__main__":
     unittest.main()

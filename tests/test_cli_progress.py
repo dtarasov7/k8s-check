@@ -52,6 +52,33 @@ class CLIProgressTest(unittest.TestCase):
         self.assertEqual("operator", config["prometheus"]["username"])
         self.assertEqual("secret-from-file", config["prometheus"]["password"])
 
+    def test_incident_purpose_resolves_window_and_passes_it_to_nodes(self):
+        arguments = _parser().parse_args(
+            [
+                "snapshot",
+                "--inventory",
+                "inventory.ini",
+                "--purpose",
+                "incident",
+                "--incident-start",
+                "2026-08-27T10:00:00Z",
+                "--incident-end",
+                "2026-08-27T11:00:00Z",
+            ]
+        )
+        config = _snapshot_config(arguments)
+        self.assertEqual("incident", config["analysis"]["purpose"])
+        node_arguments = _node_arguments(config)
+        self.assertEqual("2026-08-27T10:00:00Z", node_arguments[node_arguments.index("--journal-since") + 1])
+        self.assertEqual("2026-08-27T11:00:00Z", node_arguments[node_arguments.index("--journal-until") + 1])
+
+    def test_incident_requires_an_explicit_window(self):
+        arguments = _parser().parse_args(
+            ["snapshot", "--inventory", "inventory.ini", "--purpose", "incident"]
+        )
+        with self.assertRaisesRegex(ValueError, "incident window"):
+            _snapshot_config(arguments)
+
 
 if __name__ == "__main__":
     unittest.main()

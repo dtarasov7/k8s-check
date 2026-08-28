@@ -1,6 +1,6 @@
 # Автономный rule pack kdiag
 
-Rule pack `2026.08.13` содержит 98 проверок и работает без сети, LLM и внешней базы знаний. После сборки все классификаторы, карточки правил, ссылки на первичные источники и synthetic self-test входят в `kdiag.pyz`.
+Rule pack `2026.08.14` содержит 98 проверок и работает без сети, LLM и внешней базы знаний. После сборки все классификаторы, карточки правил, ссылки на первичные источники и synthetic self-test входят в `kdiag.pyz`.
 
 ## Модель достоверности
 
@@ -9,6 +9,8 @@ Rule pack `2026.08.13` содержит 98 проверок и работает 
 - `hypothesis` — сигнатура журнала или неполная комбинация evidence. Требуются указанные в рекомендации локальные проверки.
 
 Отсутствие finding не означает отсутствие проблемы. Ledger каждого правила использует `matched`, `not_matched`, `unknown` или `not_applicable`; при `unknown` перечисляется отсутствующий evidence, объявленный зависимостью именно этого правила. Общий partial status или несвязанный log gap не переводит весь префикс правил в `unknown`.
+
+После срабатывания правила отдельный слой 0.10.0 назначает проблеме состояние `active`, `resolved` или `unknown` и роль `possible_cause`, `consequence` или `configuration_risk`. Текущие структурированные данные могут подтвердить active; одна старая строка журнала не может. Топологический граф связывает Kubernetes, storage и инфраструктурные компоненты, после чего возможные причины ранжируются по детерминированным признакам. Рейтинг задаёт порядок проверки, а не вероятность и не доказательство причины.
 
 ## Pipeline
 
@@ -19,6 +21,7 @@ Rule pack `2026.08.13` содержит 98 проверок и работает 
 3. Категоризированные записи дедуплицируются и round-robin ограничиваются по source/scope/category; счётчики dropped/truncated сохраняются по источникам.
 4. Корреляции используют только реальные, не inferred timestamps. Probe episodes ограничены одним Pod, node/runtime/CNI/storage — одним Node. Для независимых episodes сохраняются start/end/duration/ID.
 5. Rule evaluator формирует findings с `classification`, detection/causal confidence, bounded evidence excerpts, alternatives, counter-evidence, missing checks и безопасной рекомендацией.
+6. Анализатор актуальности и топологии назначает состояние/роль, строит ограниченный причинный граф и ранжирует возможные причины.
 
 Фиксированные защитные пределы нормализатора: не более 200 000 candidates, 50 000 сохранённых категоризированных событий и 100 неизвестных fingerprints на snapshot. Превышение отображается в `candidate_limit_drops`, `output_limit_drops`, `dropped_by_source` и finding `collector.normalization_truncated`; замещения unknown heavy hitters — в `unknown_fingerprint_replacements`.
 
@@ -43,7 +46,7 @@ Rule pack `2026.08.13` содержит 98 проверок и работает 
 - PVC/PV/StorageClass, VolumeAttachment, CSIDriver/CSINode и CiliumEndpoint/CiliumNode/policy status;
 - CRI RuntimeReady/NetworkReady, активный swap, отдельные runtime filesystems и Kubernetes version skew; CRI-O определяется по CRI и `crio.service` без прямого запуска host-команды `crio`;
 - time synchronization, X.509 `notAfter` и целостность symlink ротации kubelet client certificate;
-- firing alerts, failed config reload и corruption counter из необязательного Prometheus API, включая HTTP Basic authentication без сохранения credentials в snapshot;
+- firing alerts, failed config reload и corruption counter из необязательного Prometheus API, включая HTTP Basic authentication без сохранения credentials в snapshot; в режиме incident выполняются шесть фиксированных ограниченных `query_range` за то же окно;
 - runtime, CNI, memory/OOM, certificate/API и conntrack/network correlations.
 
 Пороговые значения, не являющиеся протокольными состояниями: root filesystem — менее 10% свободных блоков, inode — менее 5%, certificate warning — 30 суток. PSI собирается как evidence, но отдельный универсальный PSI threshold намеренно не задан: Linux определяет смысл метрик, а допустимый уровень зависит от нагрузки и должен калиброваться внутри контура.

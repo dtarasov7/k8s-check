@@ -1989,7 +1989,7 @@ def evaluate_rules(collection, node_snapshots, kubernetes, normalized=None, prom
             category = _classify_probe_message(message)
             probe_classes[category] = probe_classes.get(category, 0) + 1
     normalized_probe_events = _events(normalized, "probe_failure")
-    if normalized_probe_events:
+    if normalized is not None:
         probe_events = normalized_probe_events
         probe_classes = {}
         taxonomy = ("address_family", "no_route", "connection_refused", "timeout", "dns_error", "certificate_error")

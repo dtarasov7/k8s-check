@@ -24,6 +24,32 @@ def node_snapshot(kernel, ipv6="0"):
 
 
 class RulesTest(unittest.TestCase):
+    def test_empty_normalized_incident_does_not_restore_old_raw_probe_events(self):
+        kubernetes = {
+            "sources": {
+                "events": {
+                    "status": "collected",
+                    "data": {
+                        "items": [
+                            {
+                                "reason": "Unhealthy",
+                                "note": "Readiness probe failed: connection refused",
+                                "lastTimestamp": "2026-08-27T09:00:00Z",
+                                "regarding": {"kind": "Pod", "namespace": "demo", "name": "old-pod"},
+                            }
+                        ]
+                    },
+                }
+            }
+        }
+        findings = evaluate_rules(
+            {"collection_id": "incident", "nodes": []},
+            {},
+            kubernetes,
+            {"events": [], "correlations": [], "stats": {}},
+        )
+        self.assertNotIn("kubernetes.probe_failures", {item["rule_id"] for item in findings})
+
     def test_truncated_journals_have_concise_actionable_collection_gap(self):
         nodes = {}
         collection_nodes = []

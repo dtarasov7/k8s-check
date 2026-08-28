@@ -1,6 +1,6 @@
-# kdiag: разовый аварийный снимок Kubernetes / РЕД ОС
+# kdiag: диагностический снимок Kubernetes / РЕД ОС
 
-`kdiag` собирает с узлов и Kubernetes API ограниченный диагностический snapshot, нормализует и коррелирует события, формирует локальные gzip/JSON bundles, deterministic findings и Markdown-отчёт. Необязательная offline-команда подготавливает минимизированные данные для LLM, но LLM не требуется для сбора и детерминированного анализа. Автоматическое исправление и постоянные агенты не используются.
+`kdiag` 0.11.0 собирает с узлов и Kubernetes API ограниченный диагностический snapshot, нормализует и коррелирует события, формирует локальные gzip/JSON bundles, детерминированные карточки проблем и Markdown-отчёт. Запуск имеет явное назначение: обычная проверка состояния или разбор инцидента в заданном временном окне. Отдельный workflow создаёт и явно утверждает baseline устойчивого состояния, после чего новые коллекции можно сравнивать с ним. Необязательная offline-команда подготавливает минимизированные данные для LLM, но LLM не требуется для сбора и детерминированного анализа. Автоматическое исправление и постоянные агенты не используются.
 
 ## Что реализовано
 
@@ -20,6 +20,10 @@
 - полностью автономные карточки известных сообщений с категориями «штатное», «наблюдение», «требует внимания» и «безопасность», частотой, временем, затронутыми объектами, локальными сопоставлениями, условиями решения и недоступными проверками;
 - контроль полноты каждой команды узла, журнала Pod и источника Kubernetes, а также результаты каждой проверки: проблема обнаружена, не обнаружена, не удалось проверить или не применяется;
 - карточки проблем с ограниченными фрагментами исходных данных, противоречащими признаками, недоступными проверками и временной шкалой;
+- состояния проблем «активно», «завершилось», «неизвестно» и роли «возможная причина», «следствие», «конфигурационный риск»;
+- фиксированный каталог ограниченных Prometheus `query_range` для окна инцидента;
+- топологический причинный граф Node/Pod/workload/Service/EndpointSlice/PV/PVC/CSI и ранжирование возможных причин;
+- отдельные стадии создания кандидата, явного утверждения и source-aware сравнения с baseline; утверждённый документ защищён SHA-256 профиля и всего канонического документа;
 - необязательные минимизированные пакеты для локальной LLM с выбранными evidence fragments и fail-closed псевдонимизированные пакеты для ручной работы с внешней LLM.
 
 Подробные инструкции: [User Guide (English)](docs/UserGuide.md) и [Руководство пользователя (русский)](docs/UserGuide-ru.md).
@@ -86,6 +90,8 @@ python3.8 dist/kdiag.pyz --version
 
 Безопасный default для прикладных namespace — пустой список. Namespace можно разрешить в JSON или повторяемым параметром `--application-namespace`.
 
+По умолчанию используется `analysis.purpose=check`: отчёт показывает текущее состояние и конфигурационные риски, а завершившиеся старые сообщения не выводит как активную проблему. Для `analysis.purpose=incident` обязательно задаётся начало инцидента; конец можно задать явно или принять текущим временем.
+
 Сбор stacked-etcd включён параметром `collection.collect_etcd=true`; его можно отключить в JSON. Прямой cgroup-сбор и связанные проверки можно отключить через `collection.collect_cgroup=false` или `--skip-cgroup`. Optional Cilium CRD и `CSIStorageCapacity` не переводят snapshot в `partial`, если API конкретной версии отсутствует, но отображаются в coverage matrix.
 
 ## Запуск
@@ -99,11 +105,26 @@ python3.8 dist/kdiag.pyz snapshot \
   --output-dir /var/lib/kdiag
 ```
 
+Разбор известного окна инцидента:
+
+```bash
+python3.8 dist/kdiag.pyz snapshot -i /path/to/inventory \
+  --purpose incident \
+  --incident-start 2026-08-27T10:00:00Z \
+  --incident-end 2026-08-27T12:00:00Z \
+  --prometheus-url http://prometheus:9090 \
+  -o /var/lib/kdiag
+```
+
+Для окна до текущего времени можно использовать `--incident-since 30m`, `2h` или `1d`. Параметры окна без `--purpose incident` отклоняются.
+
 Полезные параметры:
 
 - `--ssh-user USER` — user по умолчанию, если его нет в inventory;
 - `--remote-python /path/python3.8` — Python на узлах;
 - `--since-hours 24` — окно журналов;
+- `--purpose check|incident` — обычная проверка или разбор инцидента;
+- `--incident-since 2h` либо `--incident-start/--incident-end` — обязательное явное окно инцидента;
 - `--parallelism 2` — число одновременно опрашиваемых узлов;
 - `--progress off|summary|detail` — отключить progress, показать этапы/узлы или также статусы отдельных источников; по умолчанию `summary`, вывод направляется в `stderr`;
 - `--skip-cgroup` — не собирать прямые cgroup facts и не создавать cgroup events/findings;
@@ -111,6 +132,7 @@ python3.8 dist/kdiag.pyz snapshot \
 - `--prometheus-url URL` — best-effort Prometheus evidence;
 - `--prometheus-username USER` и `--prometheus-password-file FILE` — необязательная HTTP Basic authentication Prometheus;
 - `--application-namespace NAME` — явно разрешить логи namespace.
+- `--baseline BASELINE.json` — проверить новый snapshot по утверждённому baseline и сохранить результат в collection.
 
 `ansible_ssh_common_args` и `ansible_ssh_extra_args` намеренно не исполняются. Для ProxyJump или сложного inventory сначала создайте проверенный OpenSSH alias и используйте его как `ansible_host`.
 
@@ -131,12 +153,15 @@ python3.8 dist/kdiag.pyz snapshot \
   normalized-events.json.gz
   facts.json
   findings.json
+  causal-graph.json
   report.json
   report.md
+  baseline-comparison.json  # если задан baseline
+  baseline-comparison.md    # если задан baseline
   manifest.json
 ```
 
-`report.md` — краткий русскоязычный отчёт администратора. Одинаковые проблемы источников группируются по узлам, успешно собранные источники показываются одним счётчиком, а каждая проблема отвечает на вопросы: что обнаружено, что это означает, что говорит против, что не удалось проверить и что делать. Полный перечень источников и результаты каждой проверки остаются в `report.json`. Повторно построить отчёт можно командой:
+`report.md` — краткий русскоязычный отчёт администратора. Одинаковые проблемы источников группируются по узлам, успешно собранные источники показываются одним счётчиком, а каждая проблема отвечает на вопросы: что обнаружено, каково её состояние и роль, что говорит против, что не удалось проверить и что делать. В режиме инцидента отчёт показывает ранжированные возможные причины и изменения фиксированных метрик Prometheus. Балл гипотезы задаёт порядок проверки и не является вероятностью. Полный перечень источников и результаты каждой проверки остаются в `report.json`, полный граф — в `causal-graph.json`. Повторно построить отчёт можно командой:
 
 ```bash
 python3.8 dist/kdiag.pyz report /var/lib/kdiag/<collection-id>
@@ -149,6 +174,32 @@ python3.8 dist/kdiag.pyz verify /var/lib/kdiag/<collection-id>
 ```
 
 Manifest выявляет случайную порчу, удаление и добавление файлов. Он не является цифровой подписью и не защищает от намеренной согласованной подмены файлов вместе с `manifest.json`.
+
+## Утверждаемый baseline
+
+Baseline не создаётся автоматически из успешного запуска и не хранится во внешнем сервисе. Сначала из уже завершённой и проверяемой collection создаётся кандидат вне каталога collection, затем оператор утверждает его отдельной командой с указанием автора:
+
+```bash
+python3.8 dist/kdiag.pyz baseline create /var/lib/kdiag/<collection-id> \
+  --name production --output /secure/baseline-candidate.json
+python3.8 dist/kdiag.pyz baseline approve /secure/baseline-candidate.json \
+  --approved-by operator@example --output /secure/baseline.json
+python3.8 dist/kdiag.pyz compare /var/lib/kdiag/<new-collection-id> \
+  --baseline /secure/baseline.json
+```
+
+Approval блокируется при активных critical findings или существенных пробелах обязательных источников. Исключение требует явного `--override-unsafe`; флаг и причины сохраняются в baseline. Существующий output baseline не перезаписывается. Перед каждым сравнением проверяются SHA-256 стабильного профиля и всего канонического утверждённого документа.
+
+Профиль содержит Node/role/OS/architecture/cgroup и версии kubelet/runtime, Kubernetes Services и workloads, StorageClass/CSI, control-plane/etcd/DNS/Cilium topology/configuration, ожидаемые системные images, хеши конфигураций и активные findings по rule ID. Timestamps, UID, IP/PID, Lease times, строки logs, динамические Job и случайные Pod/ReplicaSet suffix в профиль не входят. Если новый source не собран, результат по нему — `unverifiable`, а его объекты не помечаются удалёнными.
+
+Команда `compare` записывает `baseline-comparison.json`, русскоязычный `baseline-comparison.md` и обновляет `manifest.json`. Тот же код используется параметром snapshot:
+
+```bash
+python3.8 dist/kdiag.pyz snapshot -i inventory.ini --config config/snapshot.json \
+  --baseline /secure/baseline.json -o /var/lib/kdiag
+```
+
+Изменения baseline всегда проходят новый цикл create/approve; автоматического «обучения нормы» нет.
 
 ## Автономные правила
 

@@ -1,5 +1,6 @@
 import base64
 import json
+import math
 import re
 import ssl
 import urllib.error
@@ -7,6 +8,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from kdiag.analysis import parse_utc_timestamp
 from kdiag.runner import run_process
 from kdiag.util import utc_now
 
@@ -64,6 +66,50 @@ CONFIGMAP_CANDIDATES = {
         ("kube-system", "node-local-dns"),
     ),
 }
+
+
+PROMETHEUS_RANGE_QUERIES = (
+    {
+        "id": "api_server_5xx",
+        "title": "Ошибки Kubernetes API 5xx",
+        "unit": "requests_per_second",
+        "query": 'sum(rate(apiserver_request_total{code=~"5.."}[5m]))',
+    },
+    {
+        "id": "api_server_p99_latency",
+        "title": "P99 задержки Kubernetes API",
+        "unit": "seconds",
+        "query": "histogram_quantile(0.99, sum by (le) (rate(apiserver_request_duration_seconds_bucket[5m])))",
+    },
+    {
+        "id": "etcd_wal_fsync_p99",
+        "title": "P99 fsync WAL etcd",
+        "unit": "seconds",
+        "query": "histogram_quantile(0.99, sum by (le) (rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m])))",
+    },
+    {
+        "id": "pod_restarts_total",
+        "title": "Суммарное число перезапусков контейнеров",
+        "unit": "restarts",
+        "query": "sum(kube_pod_container_status_restarts_total)",
+    },
+    {
+        "id": "container_network_errors",
+        "title": "Ошибки приёма и передачи контейнерной сети",
+        "unit": "errors_per_second",
+        "query": "sum(rate(container_network_receive_errors_total[5m]) + rate(container_network_transmit_errors_total[5m]))",
+    },
+    {
+        "id": "node_cpu_iowait_steal",
+        "title": "CPU iowait и steal",
+        "unit": "cores",
+        "query": 'sum(rate(node_cpu_seconds_total{mode=~"iowait|steal"}[5m]))',
+    },
+)
+
+ALLOWED_PROMETHEUS_LABELS = ("cluster", "instance", "job", "namespace", "node", "pod")
+MAX_PROMETHEUS_SERIES = 200
+MAX_PROMETHEUS_SAMPLES_PER_SERIES = 1000
 
 
 def snapshot_status(snapshot, logs_required):
@@ -903,13 +949,13 @@ class KubectlCollector:
         last["attempts"] = attempts
         return last
 
-    def collect(self, system_namespaces, application_namespaces, collect_logs, log_tail_lines, max_log_pods, max_log_bytes):
+    def collect(self, system_namespaces, application_namespaces, collect_logs, log_tail_lines, max_log_pods, max_log_bytes, log_since_time=None):
         sources = {}
         specifications = (
             ("nodes", ["get", "nodes", "-o", "json"], project_node, True),
             ("pods", ["get", "pods", "--all-namespaces", "-o", "json"], project_pod, True),
             ("events", ["get", "events", "--all-namespaces", "-o", "json"], project_event, True),
-            ("workloads", ["get", "deployments,statefulsets,daemonsets,jobs", "--all-namespaces", "-o", "json"], project_workload, True),
+            ("workloads", ["get", "deployments,statefulsets,daemonsets,jobs,replicasets", "--all-namespaces", "-o", "json"], project_workload, True),
             ("services", ["get", "services", "--all-namespaces", "-o", "json"], project_service, True),
             ("endpoint_slices", ["get", "endpointslices.discovery.k8s.io", "--all-namespaces", "-o", "json"], project_endpoint_slice, True),
             ("pdb", ["get", "poddisruptionbudgets.policy", "--all-namespaces", "-o", "json"], project_pdb, True),
@@ -981,6 +1027,7 @@ class KubectlCollector:
             log_tail_lines,
             max_log_pods,
             max_log_bytes,
+            since_time=log_since_time,
         ) if collect_logs else {"status": "disabled", "entries": []}
         self._emit_progress("logs", logs.get("status"))
         return {
@@ -991,7 +1038,7 @@ class KubectlCollector:
             "logs": logs,
         }
 
-    def _collect_logs(self, pods_source, namespaces, tail_lines, max_pods, max_total_bytes):
+    def _collect_logs(self, pods_source, namespaces, tail_lines, max_pods, max_total_bytes, since_time=None):
         if pods_source.get("status") != "collected":
             return {"status": "source_unavailable", "entries": [], "error": "pods source unavailable"}
         pods = pods_source.get("data", {}).get("items", [])
@@ -1035,6 +1082,8 @@ class KubectlCollector:
                         str(tail_lines),
                         "--timestamps=true",
                     ]
+                    if since_time:
+                        argv.append("--since-time={0}".format(since_time))
                     if previous:
                         argv.append("--previous")
                     result = run_process(argv, self.timeout_seconds, min(remaining, 512 * 1024))
@@ -1062,7 +1111,76 @@ class KubectlCollector:
         return {"status": status, "entries": entries, "bytes": consumed, "selected_pods": len(selected)}
 
 
-def collect_prometheus(url, timeout_seconds, max_response_bytes, username=None, password=None):
+def _prometheus_range_step(range_start, range_end):
+    start = parse_utc_timestamp(range_start, "Prometheus range start")
+    end = parse_utc_timestamp(range_end, "Prometheus range end")
+    duration = (end - start).total_seconds()
+    if duration <= 0:
+        raise ValueError("Prometheus range start must be earlier than end")
+    raw = max(30, int(math.ceil(duration / 600.0)))
+    return int(math.ceil(raw / 30.0) * 30)
+
+
+def _project_prometheus_range(document, query):
+    if document.get("status") != "success":
+        return {
+            "status": "query_error",
+            "required": False,
+            "error": "{0}: {1}".format(document.get("errorType") or "query failed", str(document.get("error") or "")[:2048]),
+        }
+    data = document.get("data", {}) or {}
+    if data.get("resultType") != "matrix" or not isinstance(data.get("result"), list):
+        return {"status": "malformed", "required": False, "error": "query_range did not return a matrix"}
+    projected_series = []
+    sample_count = 0
+    truncated = len(data["result"]) > MAX_PROMETHEUS_SERIES
+    for item in data["result"][:MAX_PROMETHEUS_SERIES]:
+        metric = item.get("metric", {}) or {}
+        raw_values = item.get("values", []) or []
+        values = []
+        for sample in raw_values[:MAX_PROMETHEUS_SAMPLES_PER_SERIES]:
+            if not isinstance(sample, list) or len(sample) != 2:
+                continue
+            try:
+                timestamp = float(sample[0])
+            except (TypeError, ValueError):
+                continue
+            value = str(sample[1])[:128]
+            values.append([timestamp, value])
+        if len(raw_values) > len(values):
+            truncated = True
+        sample_count += len(values)
+        projected_series.append(
+            {
+                "metric": {key: str(metric[key])[:512] for key in ALLOWED_PROMETHEUS_LABELS if key in metric},
+                "values": values,
+            }
+        )
+    return {
+        "status": "collected",
+        "required": False,
+        "data": {
+            "query_id": query["id"],
+            "title": query["title"],
+            "unit": query["unit"],
+            "query": query["query"],
+            "series": projected_series,
+            "series_count": len(projected_series),
+            "sample_count": sample_count,
+            "truncated": truncated,
+        },
+    }
+
+
+def collect_prometheus(
+    url,
+    timeout_seconds,
+    max_response_bytes,
+    username=None,
+    password=None,
+    range_start=None,
+    range_end=None,
+):
     if not url:
         return {"kind": "prometheus_snapshot", "status": "not_configured", "sources": {}}
     if (username is None) != (password is None):
@@ -1108,8 +1226,67 @@ def collect_prometheus(url, timeout_seconds, max_response_bytes, username=None, 
             else:
                 data = document.get("data", {}) or {}
                 projected = {key: data.get(key) for key in ("startTime", "CWD", "reloadConfigSuccess", "lastConfigTime", "corruptionCount") if key in data}
-            sources[source_id] = {"status": "collected", "data": projected}
+            sources[source_id] = {"status": "collected", "required": True, "data": projected}
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
-            sources[source_id] = {"status": "unreachable", "error": str(error)}
-    overall = "collected" if any(item.get("status") == "collected" for item in sources.values()) else "unreachable"
-    return {"kind": "prometheus_snapshot", "status": overall, "collected_at": utc_now(), "sources": sources}
+            sources[source_id] = {"status": "unreachable", "required": True, "error": str(error)}
+
+    range_status = "not_requested"
+    range_step = None
+    if range_start or range_end:
+        if not range_start or not range_end:
+            return {
+                "kind": "prometheus_snapshot",
+                "status": "invalid_range",
+                "sources": sources,
+                "error": "both Prometheus range_start and range_end are required",
+            }
+        try:
+            range_step = _prometheus_range_step(range_start, range_end)
+        except ValueError as error:
+            return {"kind": "prometheus_snapshot", "status": "invalid_range", "sources": sources, "error": str(error)}
+        for query in PROMETHEUS_RANGE_QUERIES:
+            parameters = urllib.parse.urlencode(
+                {
+                    "query": query["query"],
+                    "start": range_start,
+                    "end": range_end,
+                    "step": range_step,
+                }
+            )
+            source_id = "range_{0}".format(query["id"])
+            request = urllib.request.Request(base + "/api/v1/query_range?" + parameters, method="GET", headers=headers)
+            try:
+                with opener.open(request, timeout=timeout_seconds) as response:
+                    payload = response.read(max_response_bytes + 1)
+                if len(payload) > max_response_bytes:
+                    sources[source_id] = {"status": "truncated", "required": False, "error": "response exceeds limit"}
+                    continue
+                document = json.loads(payload.decode("utf-8"))
+                sources[source_id] = _project_prometheus_range(document, query)
+            except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+                sources[source_id] = {"status": "unreachable", "required": False, "error": str(error)}
+        range_statuses = [sources["range_{0}".format(query["id"])].get("status") for query in PROMETHEUS_RANGE_QUERIES]
+        if all(status == "collected" for status in range_statuses):
+            range_status = "collected"
+        elif any(status == "collected" for status in range_statuses):
+            range_status = "partial"
+        else:
+            range_status = "unavailable"
+
+    required_statuses = [item.get("status") for item in sources.values() if item.get("required", True)]
+    if required_statuses and all(status == "collected" for status in required_statuses):
+        overall = "collected"
+    elif any(status == "collected" for status in required_statuses):
+        overall = "partial"
+    else:
+        overall = "unreachable"
+    return {
+        "kind": "prometheus_snapshot",
+        "status": overall,
+        "collected_at": utc_now(),
+        "range_start": range_start,
+        "range_end": range_end,
+        "range_step_seconds": range_step,
+        "range_status": range_status,
+        "sources": sources,
+    }

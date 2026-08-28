@@ -358,13 +358,19 @@ def _component_versions(facts, findings, normalized=None, kubernetes=None):
 
 def _finding_projection(findings, registry):
     result = []
+    finding_ids = {}
     for index, finding in enumerate(findings[:100], 1):
         evidence_ids = [registry.get(value) for value in finding.get("evidence", []) or []]
+        public_id = "FINDING_{0:03d}".format(index)
+        if finding.get("id"):
+            finding_ids[str(finding["id"])] = public_id
         result.append(
             {
-                "finding_id": "FINDING_{0:03d}".format(index),
+                "finding_id": public_id,
                 "rule_id": _clean_text(finding.get("rule_id"), 256),
                 "severity": _clean_text(finding.get("severity"), 32),
+                "status": _clean_text(finding.get("finding_status"), 32),
+                "role": _clean_text(finding.get("finding_role"), 32),
                 "classification": _clean_text(finding.get("classification"), 32),
                 "detection_confidence": _clean_text(finding.get("detection_confidence"), 32),
                 "causal_confidence": _clean_text(finding.get("causal_confidence"), 32),
@@ -381,7 +387,55 @@ def _finding_projection(findings, registry):
                 "recommendation": _clean_text(finding.get("recommendation"), 2048),
             }
         )
+    return result, finding_ids
+
+
+def _hypothesis_projection(hypotheses, finding_ids):
+    result = []
+    for item in (hypotheses or [])[:20]:
+        finding_id = finding_ids.get(str(item.get("finding_id") or ""))
+        if not finding_id:
+            continue
+        result.append(
+            {
+                "rank": item.get("rank"),
+                "finding_id": finding_id,
+                "rule_id": _clean_text(item.get("rule_id"), 256),
+                "score": item.get("score"),
+                "status": _clean_text(item.get("status"), 32),
+                "role": _clean_text(item.get("role"), 32),
+                "reasons": [_clean_text(value, 512) for value in (item.get("reasons") or [])[:10]],
+                "downstream_findings": [
+                    finding_ids[value]
+                    for value in (item.get("downstream_findings") or [])[:20]
+                    if value in finding_ids
+                ],
+            }
+        )
     return result
+
+
+def _metric_signal_projection(values):
+    return [
+        {
+            key: item.get(key)
+            for key in (
+                "query_id",
+                "title",
+                "unit",
+                "series_count",
+                "sample_count",
+                "first",
+                "last",
+                "minimum",
+                "maximum",
+                "change",
+                "trend",
+                "truncated",
+            )
+        }
+        for item in (values or [])[:20]
+    ]
 
 
 def _event_projection(normalized, registry):
@@ -456,7 +510,7 @@ def _unknown_projection(normalized):
 
 def _build_package(collection, facts, report, normalized, profile, mode, question, resolver=None):
     registry = _EvidenceRegistry()
-    findings = _finding_projection(report.get("findings", []) or [], registry)
+    findings, finding_ids = _finding_projection(report.get("findings", []) or [], registry)
     events = _event_projection(normalized, registry)
     correlations = _correlation_projection(normalized, registry)
     fragments = []
@@ -480,10 +534,15 @@ def _build_package(collection, facts, report, normalized, profile, mode, questio
         "incident": {
             "collection_status": _clean_text(collection.get("status"), 64),
             "node_count": len(collection.get("nodes", []) or []),
+            "purpose": _clean_text((report.get("analysis") or {}).get("purpose") or "check", 32),
+            "window_start": _clean_text((report.get("analysis") or {}).get("incident_start"), 128),
+            "window_end": _clean_text((report.get("analysis") or {}).get("incident_end"), 128),
         },
         "components": _component_versions(facts, report.get("findings", []) or [], normalized, resolver._document("kubernetes.json.gz") if resolver else None),
         "coverage": _coverage_projection(report, profile == "external"),
         "findings": findings,
+        "ranked_hypotheses": _hypothesis_projection(report.get("hypotheses", []), finding_ids),
+        "metric_signals": _metric_signal_projection(report.get("metric_signals", [])),
         "events": events,
         "correlations": correlations,
         "evidence_fragments": fragments,
@@ -674,16 +733,21 @@ def _dlp_findings(text, known_values=()):
 def _trim_package(package, max_bytes):
     if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 16 * 1024 or max_bytes > MAX_PACKAGE_BYTES:
         raise ValueError("max_package_bytes must be between 16384 and {0}".format(MAX_PACKAGE_BYTES))
-    trimmed = {"events": 0, "correlations": 0, "unknown_fingerprints": 0, "evidence_fragments": 0}
-    for key in ("unknown_fingerprints", "events", "correlations", "evidence_fragments"):
+    removable = ("unknown_fingerprints", "events", "correlations", "evidence_fragments", "metric_signals", "ranked_hypotheses")
+    trimmed = {key: 0 for key in removable}
+    for key in removable:
         while len(_incident_bytes(package)) > max_bytes and package[key]:
             package[key].pop()
             trimmed[key] += 1
     if len(_incident_bytes(package)) > max_bytes:
         raise ValueError("essential LLM package exceeds max_package_bytes")
     package["truncation"] = {"max_package_bytes": max_bytes, "removed": trimmed}
+    for key in removable:
+        while len(_incident_bytes(package)) > max_bytes and package[key]:
+            package[key].pop()
+            trimmed[key] += 1
     if len(_incident_bytes(package)) > max_bytes:
-        package.pop("truncation")
+        raise ValueError("essential LLM package and truncation metadata exceed max_package_bytes")
     return package
 
 
@@ -695,7 +759,7 @@ def _prompt(profile, mode, question, incident_name):
     mode_instruction = (
         "Return no more than five ranked claims."
         if mode == "fast-triage"
-        else "Analyze unknown_fingerprints as well as findings, events, correlations, and counter-evidence."
+        else "Analyze ranked_hypotheses, metric_signals, unknown_fingerprints, findings, events, correlations, and counter-evidence."
     )
     return (
         "You are a read-only Kubernetes incident analysis assistant.\n"

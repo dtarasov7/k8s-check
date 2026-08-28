@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from kdiag.kubernetes import (
     CONFIGMAP_CANDIDATES,
+    PROMETHEUS_RANGE_QUERIES,
     KubectlCollector,
     _pod_log_priority,
     project_api_service,
@@ -153,6 +154,30 @@ class KubernetesProjectionTest(unittest.TestCase):
         self.assertEqual(2, len(init_entries))
         self.assertTrue(all(item["init_container"] for item in init_entries))
 
+    def test_incident_log_collection_passes_since_time(self):
+        pod_source = {"status": "collected", "data": {"items": [{
+            "metadata": {"namespace": "kube-system", "name": "demo"},
+            "spec": {"containers": [{"name": "app"}]},
+            "status": {"containerStatuses": [{"name": "app", "restartCount": 0}]},
+        }]}}
+        calls = []
+
+        def fake_run(argv, timeout_seconds, max_stdout_bytes):
+            calls.append(list(argv))
+            return ProcessResult(list(argv), 0, b"", b"", "start", "end", 1)
+
+        collector = KubectlCollector(kubeconfig="/tmp/readonly", timeout_seconds=1, max_wire_bytes=1024)
+        with patch("kdiag.kubernetes.run_process", side_effect=fake_run):
+            collector._collect_logs(
+                pod_source,
+                ["kube-system"],
+                10,
+                10,
+                4096,
+                since_time="2026-08-27T10:00:00Z",
+            )
+        self.assertTrue(all("--since-time=2026-08-27T10:00:00Z" in argv for argv in calls))
+
     def test_extended_collector_uses_read_only_gets_and_marks_optional_sources(self):
         calls = []
 
@@ -267,6 +292,61 @@ class KubernetesProjectionTest(unittest.TestCase):
         self.assertEqual(2, len(requests))
         self.assertTrue(all(request.get_header("Authorization") == expected for request, _timeout in requests))
         self.assertNotIn("secret", json.dumps(snapshot))
+
+    def test_prometheus_query_range_uses_fixed_catalog_and_projects_bounded_series(self):
+        requests = []
+
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _kind, _value, _traceback):
+                return False
+
+            def read(self, _limit):
+                return self.payload
+
+        class Opener:
+            def open(self, request, timeout):
+                requests.append(request)
+                if "/api/v1/query_range?" in request.full_url:
+                    payload = {
+                        "status": "success",
+                        "data": {
+                            "resultType": "matrix",
+                            "result": [
+                                {
+                                    "metric": {"job": "apiserver", "instance": "10.0.0.1:6443", "secret": "DROP"},
+                                    "values": [[1787834400, "0"], [1787834460, "1.5"]],
+                                }
+                            ],
+                        },
+                    }
+                elif request.full_url.endswith("/api/v1/alerts"):
+                    payload = {"status": "success", "data": {"alerts": []}}
+                else:
+                    payload = {"status": "success", "data": {}}
+                return Response(json.dumps(payload).encode("utf-8"))
+
+        with patch("kdiag.kubernetes.urllib.request.build_opener", return_value=Opener()):
+            snapshot = collect_prometheus(
+                "https://prometheus.example.test",
+                3,
+                1024 * 1024,
+                range_start="2026-08-27T10:00:00Z",
+                range_end="2026-08-27T11:00:00Z",
+            )
+        range_requests = [request for request in requests if "/api/v1/query_range?" in request.full_url]
+        self.assertEqual(len(PROMETHEUS_RANGE_QUERIES), len(range_requests))
+        self.assertEqual("collected", snapshot["range_status"])
+        source = snapshot["sources"]["range_api_server_5xx"]
+        self.assertEqual("collected", source["status"])
+        self.assertEqual([[1787834400.0, "0"], [1787834460.0, "1.5"]], source["data"]["series"][0]["values"])
+        self.assertNotIn("DROP", json.dumps(snapshot))
+        self.assertTrue(all("start=2026-08-27T10%3A00%3A00Z" in request.full_url for request in range_requests))
 
 
 if __name__ == "__main__":

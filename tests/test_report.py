@@ -237,6 +237,7 @@ class ReportTest(unittest.TestCase):
             self.assertEqual("partial", report["status"])
             self.assertTrue((root / "facts.json").is_file())
             self.assertTrue((root / "findings.json").is_file())
+            self.assertTrue((root / "causal-graph.json").is_file())
             self.assertTrue((root / "normalized-events.json.gz").is_file())
             self.assertTrue((root / "report.json").is_file())
             self.assertTrue((root / "report.md").is_file())
@@ -251,6 +252,10 @@ class ReportTest(unittest.TestCase):
             self.assertEqual("unknown", ledger["kubernetes.failed_scheduling"]["status"])
             self.assertTrue(ledger["kubernetes.failed_scheduling"]["missing_evidence"])
             self.assertFalse(report["options"]["collect_cgroup"])
+            self.assertEqual("check", report["analysis"]["purpose"])
+            self.assertIn("hypotheses", report)
+            self.assertIn("finding_role", report["findings"][0])
+            self.assertIn("finding_status", report["findings"][0])
             self.assertEqual("disabled", report["node_inventory"][0]["cgroup_mode"])
             markdown = (root / "report.md").read_text(encoding="utf-8")
             self.assertIn("Проверки cgroup: **отключены**", markdown)
@@ -258,6 +263,9 @@ class ReportTest(unittest.TestCase):
             self.assertIn("Что обнаружено:", markdown)
             self.assertIn("Что это означает:", markdown)
             self.assertIn("Что делать:", markdown)
+            self.assertIn("Наиболее вероятные объяснения", markdown)
+            self.assertIn("Причинный граф", markdown)
+            self.assertIn("Состояние:", markdown)
             for unwanted in ("Rule ID:", "Evidence:", "Counter-evidence:", "Missing checks:", "## Findings", "ledger", "coverage"):
                 self.assertNotIn(unwanted, markdown)
 

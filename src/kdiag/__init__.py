@@ -1,3 +1,3 @@
-"""Deterministic Kubernetes incident snapshot collector."""
+"""Deterministic Kubernetes diagnostic snapshot collector."""
 
-__version__ = "0.9.2"
+__version__ = "0.11.0"

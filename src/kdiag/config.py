@@ -3,6 +3,7 @@ import json
 import re
 from pathlib import Path
 
+from kdiag.analysis import resolve_analysis_window
 from kdiag.util import require_k8s_name
 
 
@@ -13,6 +14,11 @@ REMOTE_PATH_RE = re.compile(r"^/[A-Za-z0-9_./+-]+$")
 
 DEFAULT_CONFIG = {
     "schema_version": 1,
+    "analysis": {
+        "purpose": "check",
+        "incident_start": None,
+        "incident_end": None,
+    },
     "collection": {
         "since_hours": 24,
         "parallelism": 2,
@@ -86,6 +92,13 @@ def validate_config(config):
         raise ValueError("collection.collect_etcd must be boolean")
     if not isinstance(config["collection"].get("collect_cgroup"), bool):
         raise ValueError("collection.collect_cgroup must be boolean")
+    analysis = config["analysis"]
+    resolved_analysis = resolve_analysis_window(
+        analysis.get("purpose"),
+        incident_start=analysis.get("incident_start"),
+        incident_end=analysis.get("incident_end"),
+    )
+    analysis.update(resolved_analysis)
     for key in (
         "since_hours",
         "parallelism",

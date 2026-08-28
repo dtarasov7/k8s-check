@@ -2,6 +2,7 @@ import os
 import re
 from pathlib import Path
 
+from kdiag.causal import annotate_findings, build_causal_analysis
 from kdiag.message_insights import enrich_message_insights
 from kdiag.normalize import normalize_evidence
 from kdiag.rule_catalog import RULE_CATALOG, RULE_PACK_VERSION
@@ -60,7 +61,7 @@ def _node_row(name, snapshot):
     }
 
 
-def _coverage(collection, nodes, kubernetes):
+def _coverage(collection, nodes, kubernetes, prometheus=None):
     coverage = []
     required_commands = {"journal_services_current", "journal_kernel_current"}
     for item in collection.get("nodes", []):
@@ -136,6 +137,15 @@ def _coverage(collection, nodes, kubernetes):
                 }
             )
     coverage.append({"source": "prometheus", "status": collection.get("prometheus", {}).get("status"), "error": collection.get("prometheus", {}).get("error"), "required": False})
+    for source_id, source in sorted(((prometheus or {}).get("sources", {}) or {}).items()):
+        coverage.append(
+            {
+                "source": "prometheus/{0}".format(source_id),
+                "status": source.get("status"),
+                "error": source.get("error"),
+                "required": source.get("required", False),
+            }
+        )
     return coverage
 
 
@@ -433,6 +443,13 @@ STATUS_LABELS = {
     "missing": "не собрано",
     "disabled": "отключено",
     "not_configured": "не настроено",
+    "complete": "сбор завершён",
+    "query_error": "ошибка запроса",
+    "malformed": "некорректный ответ",
+    "invalid_auth": "ошибка настройки доступа",
+    "invalid_url": "некорректный адрес",
+    "invalid_range": "некорректное окно",
+    "unavailable": "недоступно",
     "matched": "проблема обнаружена",
     "not_matched": "проблема не обнаружена",
     "unknown": "не удалось проверить",
@@ -452,6 +469,24 @@ CLASSIFICATION_LABELS = {
     "fact": "зафиксированный факт",
     "correlation": "совпадение признаков по времени и объекту",
     "hypothesis": "предположение, требующее проверки",
+}
+
+FINDING_STATUS_LABELS = {
+    "active": "активно",
+    "resolved": "завершилось",
+    "unknown": "неизвестно",
+}
+
+FINDING_ROLE_LABELS = {
+    "possible_cause": "возможная причина",
+    "consequence": "следствие",
+    "configuration_risk": "конфигурационный риск",
+}
+
+METRIC_TREND_LABELS = {
+    "rising": "растёт",
+    "falling": "снижается",
+    "stable": "без заметного изменения",
 }
 
 INSIGHT_CATEGORY_LABELS = {
@@ -483,6 +518,17 @@ SOURCE_LABELS = {
     "endpoint_slices": "объекты EndpointSlice",
     "api_readyz": "готовность API server",
     "logs": "журналы системных Pod",
+}
+
+PROMETHEUS_SOURCE_LABELS = {
+    "alerts": "активные оповещения",
+    "runtimeinfo": "состояние процесса",
+    "range_api_server_5xx": "ошибки Kubernetes API 5xx",
+    "range_api_server_p99_latency": "P99 задержки Kubernetes API",
+    "range_etcd_wal_fsync_p99": "P99 fsync WAL etcd",
+    "range_pod_restarts_total": "перезапуски контейнеров",
+    "range_container_network_errors": "ошибки контейнерной сети",
+    "range_node_cpu_iowait_steal": "CPU iowait и steal",
 }
 
 FINDING_BACKED_INSIGHTS = frozenset(("authentication_config_read_error", "ptrace_attack_attempt"))
@@ -519,6 +565,9 @@ def _source_label(value):
         return "Kubernetes API"
     if text == "prometheus":
         return "Prometheus"
+    match = re.match(r"^prometheus/(.+)$", text)
+    if match:
+        return "Prometheus: {0}".format(PROMETHEUS_SOURCE_LABELS.get(match.group(1), match.group(1)))
     return text
 
 
@@ -737,6 +786,74 @@ def _compact_missing_evidence(values):
     return compact
 
 
+def _render_hypotheses(lines, hypotheses, limit=10):
+    lines.extend(
+        [
+            "## Наиболее вероятные объяснения",
+            "",
+            "Это детерминированное ранжирование по важности, актуальности, типу правила и связям в топологии. Балл помогает выбрать порядок проверки, но не является вероятностью.",
+            "",
+        ]
+    )
+    if not hypotheses:
+        lines.extend(["Подтверждённых исходных признаков для ранжирования причин нет.", ""])
+        return
+    lines.extend(["| Место | Балл | Состояние | Роль | Гипотеза | Может объяснять |", "|---:|---:|---|---|---|---:|"])
+    for item in hypotheses[:limit]:
+        lines.append(
+            "| {0} | {1} | {2} | {3} | {4} | {5} |".format(
+                item.get("rank"),
+                item.get("score"),
+                markdown_escape(FINDING_STATUS_LABELS.get(item.get("status"), item.get("status") or "неизвестно")),
+                markdown_escape(FINDING_ROLE_LABELS.get(item.get("role"), item.get("role") or "не указана")),
+                markdown_escape(item.get("title") or item.get("rule_id") or "неизвестно"),
+                len(item.get("downstream_findings") or []),
+            )
+        )
+    lines.append("")
+    for item in hypotheses[: min(limit, 5)]:
+        lines.extend(
+            [
+                "{0}. **{1}** — {2}.".format(
+                    item.get("rank"),
+                    markdown_escape(item.get("title") or item.get("rule_id") or "неизвестно"),
+                    markdown_escape("; ".join(item.get("reasons") or [])),
+                ),
+                "",
+            ]
+        )
+    if len(hypotheses) > limit:
+        lines.extend(["Остальные гипотезы: {0}; полный список находится в `report.json`.".format(len(hypotheses) - limit), ""])
+
+
+def _render_metric_signals(lines, signals):
+    if not signals:
+        return
+    lines.extend(
+        [
+            "## Изменения диагностических метрик",
+            "",
+            "Значения рассчитаны по фиксированным запросам Prometheus в окне инцидента. Универсальные пороги не применяются: таблица показывает форму сигнала, а не самостоятельно поставленный диагноз.",
+            "",
+            "| Метрика | Начало | Конец | Минимум | Максимум | Тенденция | Точек |",
+            "|---|---:|---:|---:|---:|---|---:|",
+        ]
+    )
+    for item in signals:
+        lines.append(
+            "| {0} | {1:.6g} | {2:.6g} | {3:.6g} | {4:.6g} | {5} | {6} |".format(
+                markdown_escape(item.get("title") or item.get("query_id")),
+                item.get("first", 0),
+                item.get("last", 0),
+                item.get("minimum", 0),
+                item.get("maximum", 0),
+                markdown_escape(METRIC_TREND_LABELS.get(item.get("trend"), item.get("trend") or "неизвестно")),
+                item.get("sample_count", 0),
+            )
+        )
+    lines.append("")
+
+
 def build_report(collection_dir):
     collection, nodes, kubernetes, prometheus = load_collection(collection_dir)
     normalized = normalize_evidence(collection, nodes, kubernetes)
@@ -744,9 +861,13 @@ def build_report(collection_dir):
         normalized.get("message_insights", []), nodes, kubernetes, normalized
     )
     report_message_insights = _report_message_insights(normalized.get("message_insights", []))
-    findings = evaluate_rules(collection, nodes, kubernetes, normalized, prometheus)
+    findings = annotate_findings(
+        evaluate_rules(collection, nodes, kubernetes, normalized, prometheus),
+        collection,
+    )
+    causal_analysis = build_causal_analysis(kubernetes, findings, normalized, prometheus, collection)
     node_inventory = [_node_row(name, snapshot) for name, snapshot in sorted(nodes.items())]
-    coverage = _coverage(collection, nodes, kubernetes)
+    coverage = _coverage(collection, nodes, kubernetes, prometheus)
     ledger = _rule_ledger(findings, coverage, collection.get("options", {}))
     facts = {
         "schema_version": 1,
@@ -755,6 +876,9 @@ def build_report(collection_dir):
         "options": {
             "collect_cgroup": collection.get("options", {}).get("collect_cgroup", True),
             "collect_etcd": collection.get("options", {}).get("collect_etcd", False),
+            "purpose": collection.get("options", {}).get("purpose", "check"),
+            "incident_start": collection.get("options", {}).get("incident_start"),
+            "incident_end": collection.get("options", {}).get("incident_end"),
         },
         "kubernetes": {
             "status": collection.get("kubernetes", {}).get("status"),
@@ -783,6 +907,13 @@ def build_report(collection_dir):
         },
         "coverage": coverage,
         "rule_evaluation_ledger": ledger,
+        "causal_analysis": {
+            "graph_nodes": len(causal_analysis["graph"]["nodes"]),
+            "graph_edges": len(causal_analysis["graph"]["edges"]),
+            "graph_truncated": causal_analysis["graph"]["truncated"],
+            "hypothesis_count": len(causal_analysis["hypotheses"]),
+            "metric_signal_count": len(causal_analysis["metric_signals"]),
+        },
     }
     findings_document = {
         "schema_version": 1,
@@ -790,6 +921,7 @@ def build_report(collection_dir):
         "collection_id": collection.get("collection_id"),
         "items": findings,
         "evaluation_ledger": ledger,
+        "hypotheses": causal_analysis["hypotheses"],
     }
     report = {
         "schema_version": 1,
@@ -806,14 +938,25 @@ def build_report(collection_dir):
         "prometheus_status": prometheus.get("status") if prometheus else collection.get("prometheus", {}).get("status"),
         "normalization": facts["normalization"],
         "options": facts["options"],
+        "analysis": causal_analysis["analysis"],
+        "hypotheses": causal_analysis["hypotheses"],
+        "metric_signals": causal_analysis["metric_signals"],
+        "causal_graph": {
+            "file": "causal-graph.json",
+            "node_count": len(causal_analysis["graph"]["nodes"]),
+            "edge_count": len(causal_analysis["graph"]["edges"]),
+            "truncated": causal_analysis["graph"]["truncated"],
+        },
     }
     root = Path(collection_dir)
     atomic_write_gzip_json(root / "normalized-events.json.gz", normalized)
     atomic_write_json(root / "facts.json", facts)
     atomic_write_json(root / "findings.json", findings_document)
+    atomic_write_json(root / "causal-graph.json", causal_analysis)
     atomic_write_json(root / "report.json", report)
+    purpose = report["analysis"]["purpose"]
     lines = [
-        "# Аварийный снимок Kubernetes",
+        "# {0}".format("Разбор инцидента Kubernetes" if purpose == "incident" else "Проверка состояния Kubernetes"),
         "",
         "Идентификатор сбора: `{0}`".format(markdown_escape(report["collection_id"])),
         "",
@@ -823,9 +966,25 @@ def build_report(collection_dir):
         "",
         "Проверки etcd: **{0}**".format("включены" if report["options"]["collect_etcd"] else "отключены"),
         "",
-        "## Полнота исходных данных",
+        "Назначение запуска: **{0}**".format("разбор инцидента" if purpose == "incident" else "обычная проверка"),
         "",
     ]
+    if purpose == "incident":
+        lines.extend(
+            [
+                "Окно инцидента: **{0} — {1}**".format(
+                    markdown_escape(report["analysis"].get("incident_start") or "не задано"),
+                    markdown_escape(report["analysis"].get("incident_end") or "не задано"),
+                ),
+                "",
+            ]
+        )
+    lines.extend(
+        [
+        "## Полнота исходных данных",
+        "",
+        ]
+    )
     coverage_rows = _coverage_display_rows(coverage)
     lines.append(
         "Успешно собранных источников: {0}; источников с ограничениями или ошибками: {1}. Полный технический список находится в `report.json`.".format(
@@ -871,6 +1030,22 @@ def build_report(collection_dir):
                 lines.append("- {0} — {1}.".format(markdown_escape(_human_gap(cause)), count))
             lines.append("")
         lines.extend(["Подробный список по каждой проверке сохранён в `report.json`.", ""])
+    _render_hypotheses(lines, causal_analysis["hypotheses"])
+    _render_metric_signals(lines, causal_analysis["metric_signals"])
+    causal_edges = [item for item in causal_analysis["graph"]["edges"] if item.get("relation") == "may_explain"]
+    lines.extend(
+        [
+            "## Причинный граф",
+            "",
+            "Граф содержит объектов: {0}; связей: {1}; связей «может объяснять»: {2}. Полный машиночитаемый граф находится в `causal-graph.json`{3}.".format(
+                len(causal_analysis["graph"]["nodes"]),
+                len(causal_analysis["graph"]["edges"]),
+                len(causal_edges),
+                "; достигнут лимит размера" if causal_analysis["graph"]["truncated"] else "",
+            ),
+            "",
+        ]
+    )
     lines.extend(["", "## Инвентаризация узлов", "", "| Имя в inventory | Имя узла | ОС | Ядро | cgroup | kubelet | Где отключён IPv6 |", "|---|---|---|---|---|---|---|"])
     for item in node_inventory:
         lines.append(
@@ -884,10 +1059,22 @@ def build_report(collection_dir):
                 markdown_escape(", ".join(item.get("ipv6_disabled") or [])),
             )
         )
+    visible_findings = [
+        finding for finding in findings
+        if purpose == "incident" or finding.get("finding_status") != "resolved"
+    ]
+    hidden_resolved = len(findings) - len(visible_findings)
     lines.extend(["", "## Обнаруженные проблемы", ""])
-    if not findings:
+    if hidden_resolved:
+        lines.extend(
+            [
+                "Завершившихся исторических проблем скрыто в обычном режиме: {0}. Они сохранены в `findings.json`.".format(hidden_resolved),
+                "",
+            ]
+        )
+    if not visible_findings:
         lines.append("Автоматические проверки не обнаружили проблем. Это не доказывает, что кластер полностью исправен: часть источников могла быть недоступна.")
-    for finding in findings:
+    for finding in visible_findings:
         affected = finding.get("affected") or []
         affected_visible = affected[:10]
         affected_omitted = max(0, finding.get("affected_total", len(affected)) - len(affected_visible))
@@ -904,6 +1091,11 @@ def build_report(collection_dir):
                 "Что обнаружено: {0}".format(markdown_escape(finding["summary"])),
                 "",
                 "Что это означает: {0}".format(markdown_escape(finding.get("explanation") or "Описание отсутствует.")),
+                "",
+                "Состояние: **{0}**. Роль: **{1}**.".format(
+                    markdown_escape(FINDING_STATUS_LABELS.get(finding.get("finding_status"), finding.get("finding_status") or "неизвестно")),
+                    markdown_escape(FINDING_ROLE_LABELS.get(finding.get("finding_role"), finding.get("finding_role") or "не указана")),
+                ),
                 "",
                 "Надёжность вывода: {0}; уверенность в обнаружении: {1}; уверенность в установленной причине: {2}.".format(
                     markdown_escape(CLASSIFICATION_LABELS.get(finding.get("classification"), finding.get("classification") or "не указана")),
@@ -960,11 +1152,12 @@ def build_report(collection_dir):
         [
             "## Обработка и сопоставление журналов",
             "",
-            "Обработано записей: {0}; распознано: {1}; не распознано: {2}; повреждено: {3}; совпадений по времени: {4}; данные усечены: {5}; заменено редких шаблонов: {6}.".format(
+            "Обработано записей: {0}; распознано: {1}; не распознано: {2}; повреждено: {3}; исключено вне окна инцидента: {4}; совпадений по времени: {5}; данные усечены: {6}; заменено редких шаблонов: {7}.".format(
                 stats.get("input_records", 0),
                 stats.get("categorized_records", 0),
                 stats.get("uncategorized_records", 0),
                 stats.get("malformed_records", 0),
+                stats.get("incident_window_filtered_records", 0),
                 len(normalized.get("correlations", [])),
                 stats.get("truncated", False),
                 stats.get("unknown_fingerprint_replacements", 0),

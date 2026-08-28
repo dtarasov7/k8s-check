@@ -1,6 +1,6 @@
-# kdiag: One-Time Kubernetes / RED OS Emergency Snapshot
+# kdiag: Kubernetes / RED OS Diagnostic Snapshot
 
-`kdiag` collects a bounded diagnostic snapshot from cluster nodes and the Kubernetes API, normalizes and correlates events, and produces local gzip/JSON bundles, deterministic findings, and a Markdown report. An optional offline command can prepare minimized input for an LLM, but LLM inference is not required for collection or deterministic analysis. Automatic remediation and persistent agents are not used.
+`kdiag` 0.11.0 collects a bounded diagnostic snapshot from cluster nodes and the Kubernetes API, normalizes and correlates events, and produces local gzip/JSON bundles, deterministic findings, and a Markdown report. Each run explicitly targets either a routine health check or an incident with a defined time window. A separate workflow creates and explicitly approves a stable-state baseline before new collections can be compared with it. An optional offline command can prepare minimized input for an LLM, but LLM inference is not required for collection or deterministic analysis. Automatic remediation and persistent agents are not used.
 
 ## Implemented Features
 
@@ -20,6 +20,10 @@
 - fully offline triage cards for recognized log templates, with routine/observe/actionable/security classification, occurrence/time/scope context, local health correlations, decision conditions, counter-evidence, and missing checks;
 - per-command, per-Pod-log, and per-Kubernetes-source coverage plus a dependency-aware rule evaluation ledger with `matched`, `not_matched`, `unknown`, and `not_applicable` states;
 - evidence cards with bounded excerpts, counter-evidence, missing checks, collection/correlation windows, and a correlation timeline;
+- finding states `active`, `resolved`, and `unknown`, with roles `possible_cause`, `consequence`, and `configuration_risk`;
+- a fixed bounded catalog of Prometheus `query_range` diagnostics for incident windows;
+- a topology-based causal graph and deterministic ranking of possible causes;
+- separate candidate creation, explicit approval, and source-aware baseline comparison stages, with SHA-256 for both the stable profile and the complete canonical approved document;
 - optional minimized local LLM packages with selected evidence fragments and fail-closed pseudonymized packages for a manually operated external LLM.
 
 For detailed operating instructions, see the [English User Guide](docs/UserGuide.md) or the [Russian User Guide](docs/UserGuide-ru.md).
@@ -86,6 +90,8 @@ Copy the [configuration example](config/snapshot.example.json) and set a dedicat
 
 The safe default for application namespaces is an empty list. Approve namespaces in JSON or with the repeatable `--application-namespace` option.
 
+The default `analysis.purpose=check` reports current state and configuration risks while suppressing resolved historical messages. `analysis.purpose=incident` requires an explicit start; its end can be supplied or default to the current time.
+
 Stacked-etcd collection is enabled with `collection.collect_etcd=true` and can be disabled in JSON. Direct cgroup collection and related checks can be disabled with `collection.collect_cgroup=false` or `--skip-cgroup`. Optional Cilium CRDs and `CSIStorageCapacity` do not make the snapshot `partial` when a particular API version is absent, but the coverage matrix still records them.
 
 ## Running a Snapshot
@@ -99,11 +105,26 @@ python3.8 dist/kdiag.pyz snapshot \
   --output-dir /var/lib/kdiag
 ```
 
+To analyze a known incident window:
+
+```bash
+python3.8 dist/kdiag.pyz snapshot -i /path/to/inventory \
+  --purpose incident \
+  --incident-start 2026-08-27T10:00:00Z \
+  --incident-end 2026-08-27T12:00:00Z \
+  --prometheus-url http://prometheus:9090 \
+  -o /var/lib/kdiag
+```
+
+Use `--incident-since 30m`, `2h`, or `1d` for a window ending now. Incident window options without `--purpose incident` are rejected.
+
 Useful options:
 
 - `--ssh-user USER` — default user when inventory does not specify one;
 - `--remote-python /path/python3.8` — Python interpreter on the nodes;
 - `--since-hours 24` — journal look-back window;
+- `--purpose check|incident` — routine health check or incident analysis;
+- `--incident-since 2h` or `--incident-start/--incident-end` — the required explicit incident window;
 - `--parallelism 2` — number of nodes collected concurrently;
 - `--progress off|summary|detail` — disable progress, show phases/nodes, or also show individual source statuses; defaults to `summary` and writes to `stderr`;
 - `--skip-cgroup` — skip direct cgroup facts and suppress cgroup events/findings;
@@ -111,6 +132,7 @@ Useful options:
 - `--prometheus-url URL` — optional best-effort Prometheus evidence;
 - `--prometheus-username USER` and `--prometheus-password-file FILE` — optional Prometheus HTTP Basic authentication;
 - `--application-namespace NAME` — explicitly approve logs from a namespace.
+- `--baseline BASELINE.json` — compare a new snapshot with an approved baseline and store the result in the collection.
 
 `ansible_ssh_common_args` and `ansible_ssh_extra_args` are intentionally not executed. For ProxyJump or complex inventory routing, create a reviewed OpenSSH alias and use it as `ansible_host`.
 
@@ -131,12 +153,15 @@ Every run creates a separate directory:
   normalized-events.json.gz
   facts.json
   findings.json
+  causal-graph.json
   report.json
   report.md
+  baseline-comparison.json  # when a baseline is supplied
+  baseline-comparison.md    # when a baseline is supplied
   manifest.json
 ```
 
-`report.md` is an operator-facing Russian summary. It groups identical per-node source failures, counts successful sources instead of listing every one, and explains each issue as: what was detected, what it means, contradicting data, unavailable checks, and the next action. Complete per-source coverage and per-rule evaluation records remain in `report.json`. Rebuild derived output with:
+`report.md` is an operator-facing Russian summary. It groups identical per-node source failures, counts successful sources instead of listing every one, and explains each issue with its state, role, contradicting data, unavailable checks, and next action. Incident reports include ranked possible causes and changes in the fixed Prometheus diagnostic metrics. A hypothesis score is an investigation order, not a probability. Complete per-source coverage and per-rule evaluation records remain in `report.json`; the full graph is in `causal-graph.json`. Rebuild derived output with:
 
 ```bash
 python3.8 dist/kdiag.pyz report /var/lib/kdiag/<collection-id>
@@ -149,6 +174,32 @@ python3.8 dist/kdiag.pyz verify /var/lib/kdiag/<collection-id>
 ```
 
 The manifest detects accidental corruption, deletion, and addition of files. It is not a digital signature and does not protect against coordinated replacement of data files together with `manifest.json`.
+
+## Approved Baseline
+
+A successful run is never promoted automatically and no external baseline service is used. Create a candidate from an already completed, manifest-verified collection, then approve it explicitly with an author:
+
+```bash
+python3.8 dist/kdiag.pyz baseline create /var/lib/kdiag/<collection-id> \
+  --name production --output /secure/baseline-candidate.json
+python3.8 dist/kdiag.pyz baseline approve /secure/baseline-candidate.json \
+  --approved-by operator@example --output /secure/baseline.json
+python3.8 dist/kdiag.pyz compare /var/lib/kdiag/<new-collection-id> \
+  --baseline /secure/baseline.json
+```
+
+Approval is blocked by active critical findings or material gaps in required sources. An exception requires explicit `--override-unsafe`; the flag and reasons are recorded in the baseline. Existing baseline output is never overwritten. Every comparison validates the stable-profile SHA-256 and the SHA-256 of the complete canonical approved document.
+
+The profile covers node roles, OS, architecture, cgroups, kubelet/runtime versions, Kubernetes Services and workloads, StorageClass/CSI, control-plane/etcd/DNS/Cilium topology and configuration, expected system images, configuration hashes, and active findings aggregated by rule ID. Timestamps, UIDs, IPs, PIDs, Lease times, individual log lines, dynamic Jobs, and generated Pod/ReplicaSet suffixes are excluded. When a current source is unavailable, its result is `unverifiable`; baseline objects from that source are not reported as removed.
+
+`compare` writes `baseline-comparison.json`, a Russian `baseline-comparison.md`, and an updated `manifest.json`. Snapshot uses the same comparison implementation:
+
+```bash
+python3.8 dist/kdiag.pyz snapshot -i inventory.ini --config config/snapshot.json \
+  --baseline /secure/baseline.json -o /var/lib/kdiag
+```
+
+Changing the norm always requires a new create/approve cycle; there is no automatic learning.
 
 ## Autonomous Rules
 

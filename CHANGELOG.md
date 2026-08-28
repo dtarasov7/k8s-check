@@ -6,6 +6,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-27
+
+### Added
+
+- A separate baseline workflow: create a candidate from a verified collection, explicitly approve it with an author, then compare new collections with source awareness.
+- SHA-256 for the stable profile and the complete canonical approved document; changing the profile, approval metadata, or byte representation fails validation.
+- `new_problem`, `removed`, `added`, `changed`, `resolved`, and `unverifiable` difference classes, machine-readable `baseline-comparison.json`, and Russian `baseline-comparison.md` with recommended actions.
+- `snapshot --baseline`, reusing the same comparison module and adding comparison outputs to the collection manifest.
+
+### Security
+
+- Approval is blocked by active critical findings and material gaps in required sources; exceptions require explicit `--override-unsafe` and retain their reasons.
+- Approved baselines are never overwritten, candidates are rejected for comparison, and an unavailable current source never produces false `removed` objects.
+- Timestamps, UIDs, IPs/PIDs, Lease times, individual logs, dynamic Jobs/ReplicaSets, and generated Pod suffixes are excluded. There is no external storage or automatic norm learning.
+
+## [0.10.0] - 2026-08-27
+
+### Added
+
+- `--purpose check|incident` with a required explicit incident window through `--incident-since` or absolute start/end values. The window is applied to journald, Kubernetes Pod logs, and Prometheus.
+- Finding states `active`, `resolved`, and `unknown`, plus `possible_cause`, `consequence`, and `configuration_risk` roles. Routine reports hide resolved historical findings while retaining them in JSON.
+- Six fixed bounded Prometheus `query_range` diagnostics for API, etcd, restarts, networking, and CPU in incident mode.
+- A bounded Kubernetes/storage/infrastructure causal topology, `may_explain` links, and deterministic ranking of possible causes.
+- `causal-graph.json`; ranked hypotheses and range signals are included in local and pseudonymized LLM packages.
+
+### Changed
+
+- Reports state the run purpose and window and show Russian finding states/roles, ranking, graph summary, and metric changes. Hypothesis scores are documented as investigation order, not probability.
+- New collections use kind `diagnostic_collection`; schema_version remains 1.
+- Exact-timestamp normalized records outside the incident window are excluded before rule and message-card evaluation; raw Kubernetes Events and Pod logs are not rewritten. Rule pack: `2026.08.14`.
+
 ## [0.9.2] - 2026-08-27
 
 ### Changed

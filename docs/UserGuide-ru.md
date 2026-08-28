@@ -2,11 +2,11 @@
 
 ## 1. Назначение и границы решения
 
-<code>kdiag 0.9.2</code> создаёт разовый аварийный снимок Kubernetes-кластера и выполняет полностью автономный детерминированный анализ. Текущая диагностическая совместимость — vanilla Kubernetes и Deckhouse CSE Pro 1.74 с Kubernetes 1.24–1.31, до 20 узлов и около 1000 Pod. Это совместимость форматов исходных данных и проверок, а не заявление о lifecycle support.
+<code>kdiag 0.11.0</code> создаёт разовый диагностический снимок Kubernetes-кластера, выполняет полностью автономный детерминированный анализ и умеет сравнивать коллекцию с отдельно утверждённым baseline. Запуск явно выбирает обычную проверку состояния или разбор инцидента в заданном окне. Текущая диагностическая совместимость — vanilla Kubernetes и Deckhouse CSE Pro 1.74 с Kubernetes 1.24–1.31, до 20 узлов и около 1000 Pod. Это совместимость форматов исходных данных и проверок, а не заявление о lifecycle support.
 
 Программа запускается на отдельном управляющем сервере. Она подключается к каждому узлу по SSH, выполняет диагностические команды через неинтерактивный sudo и опрашивает Kubernetes API с отдельным kubeconfig. Prometheus необязателен: снимок можно получить при недоступности Prometheus или всего Kubernetes API.
 
-Текущая версия реализует только этап **«Разовый аварийный снимок и инвентаризация»**. Периодический baseline и непрерывный watch Kubernetes/журналов относятся к следующим этапам и пока отсутствуют.
+Текущая версия реализует этап **«Разовый диагностический снимок и инвентаризация»**, включая отдельные режимы обычной проверки и инцидента. Периодический baseline и непрерывный watch Kubernetes/журналов относятся к следующим этапам и пока отсутствуют.
 
 Для работы не требуются LLM, Интернет, внешние Python-пакеты, агенты на узлах, DaemonSet или база данных. Анализ выполняет версионируемый набор правил. Необязательная команда после сбора готовит минимизированные данные для LLM и не влияет на детерминированный отчёт. Программа не обновляет Kubernetes, не исправляет кластер, не перезапускает службы, не меняет sysctl и не модифицирует etcd.
 
@@ -34,9 +34,9 @@
 1. Проверить конфигурацию, резерв диска, inventory, SSH, sudo и доступ к API.
 2. Собрать ограниченный по объёму evidence с узлов и из Kubernetes.
 3. Нормализовать журналы и структурированные состояния Kubernetes.
-4. Сопоставить связанные записи в окне 15 минут.
-5. Выполнить детерминированные правила и сформировать JSON- и Markdown-отчёты.
-6. Создать манифест с размерами файлов и SHA-256.
+4. Сопоставить связанные записи, а в режиме инцидента ограничить анализ явно заданным окном и запросить фиксированные диапазонные метрики Prometheus.
+5. Выполнить детерминированные правила, определить состояния и роли проблем, построить причинный граф и ранжировать возможные причины.
+6. Сформировать JSON- и Markdown-отчёты и создать манифест с размерами файлов и SHA-256.
 
 Недоступность одного узла или API обычно приводит к сохранению **частичного снимка**, а не к потере уже собранного evidence.
 
@@ -219,7 +219,17 @@ Inventory alias не обязан совпадать с <code>metadata.name</cod
 
 Нужно скопировать <code>config/snapshot.example.json</code> в отдельный файл среды. Формат имеет <code>schema_version: 1</code>. Ошибочные значения останавливают preflight с кодом 2.
 
-### 8.1 Collection
+### 8.1 Назначение анализа
+
+| Ключ | По умолчанию | Назначение |
+|---|---:|---|
+| <code>analysis.purpose</code> | check | <code>check</code> для обычной проверки или <code>incident</code> для разбора инцидента. |
+| <code>analysis.incident_start</code> | null | Обязательное для incident начало в ISO-8601 с UTC offset. |
+| <code>analysis.incident_end</code> | null | Конец incident; если в CLI задан только start, используется текущее время. |
+
+В режиме <code>check</code> параметры окна должны быть null. В режиме <code>incident</code> окно не может превышать 30 суток. Удобная относительная форма <code>--incident-since 2h</code> доступна только в CLI.
+
+### 8.2 Collection
 
 | Ключ | По умолчанию | Назначение |
 |---|---:|---|
@@ -235,7 +245,7 @@ Inventory alias не обязан совпадать с <code>metadata.name</cod
 | <code>collection.collect_etcd</code> | true | Read-only status, health и alarms локального etcd. |
 | <code>collection.collect_cgroup</code> | true | Прямые cgroup facts/process mappings и связанные cgroup events/findings. |
 
-### 8.2 SSH
+### 8.3 SSH
 
 | Ключ | По умолчанию | Назначение |
 |---|---:|---|
@@ -244,7 +254,7 @@ Inventory alias не обязан совпадать с <code>metadata.name</cod
 | <code>ssh.user</code> | null | Необязательное глобальное переопределение пользователя. |
 | <code>ssh.port</code> | 22 | Необязательное глобальное переопределение порта. |
 
-### 8.3 Kubernetes
+### 8.4 Kubernetes
 
 | Ключ | По умолчанию | Назначение |
 |---|---:|---|
@@ -261,7 +271,7 @@ Inventory alias не обязан совпадать с <code>metadata.name</cod
 | <code>kubernetes.max_log_pods</code> | 100 | Максимум Pod для сбора журналов через API. |
 | <code>kubernetes.max_log_bytes</code> | 33554432 | Суммарный лимит Pod logs через API. |
 
-### 8.4 Prometheus
+### 8.5 Prometheus
 
 | Ключ | По умолчанию | Назначение |
 |---|---:|---|
@@ -271,9 +281,9 @@ Inventory alias не обязан совпадать с <code>metadata.name</cod
 | <code>prometheus.timeout_seconds</code> | 3 | Короткий таймаут, чтобы Prometheus не блокировал аварийный сбор. |
 | <code>prometheus.max_response_bytes</code> | 1048576 | Максимальный размер ответа. |
 
-Недоступность Prometheus не является фатальной.
+Недоступность Prometheus не является фатальной. В обычном режиме собираются alerts и runtimeinfo. В режиме инцидента дополнительно выполняются шесть фиксированных <code>query_range</code>: API 5xx, P99 API latency, P99 etcd WAL fsync, суммарные рестарты контейнеров, сетевые ошибки контейнеров и CPU iowait/steal. Ответы ограничиваются числом рядов, точек и размером; произвольный PromQL из конфигурации не исполняется.
 
-### 8.5 Начальные 5 ГиБ
+### 8.6 Начальные 5 ГиБ
 
 Стандартные верхние границы сжатых bundle для 20 узлов и Kubernetes суммарно дают около 768 МиБ без отчётов и рабочих данных. Это защитные лимиты, а не ожидаемый объём. Начинать следует со стандартных значений и изучать <code>manifest.json</code>. При регулярном усечении важного evidence увеличивается только соответствующий лимит и обсуждается расширение диска. Нельзя обнулять резерв 1 ГиБ ради запуска на заполненной файловой системе.
 
@@ -300,6 +310,22 @@ python3.8 dist/kdiag.pyz snapshot \
   --kubeconfig /secure/kdiag.kubeconfig \
   --output-dir /var/lib/kdiag
 ~~~
+
+Обычная проверка использует <code>--purpose check</code> по умолчанию. Для разбора инцидента окно обязательно задаётся явно:
+
+~~~bash
+python3.8 dist/kdiag.pyz snapshot -i inventory.ini -g k8s_nodes \
+  --config config/snapshot.json --purpose incident \
+  --incident-start 2026-08-27T10:00:00Z \
+  --incident-end 2026-08-27T12:00:00Z \
+  --prometheus-url http://prometheus:9090 -o /var/lib/kdiag
+
+python3.8 dist/kdiag.pyz snapshot -i inventory.ini -g k8s_nodes \
+  --config config/snapshot.json --purpose incident \
+  --incident-since 2h -o /var/lib/kdiag
+~~~
+
+Абсолютное окно передаётся journalctl на узлах; Kubernetes Pod logs запрашиваются с <code>--since-time</code>; диапазонные Prometheus-запросы используют те же start/end. Поскольку kubectl logs не имеет параметра end, а Kubernetes Events могут содержать старые записи, нормализатор исключает из анализа записи с точным временем вне окна. Записи без надёжного времени не используются для причинной временной корреляции.
 
 По умолчанию в <code>stderr</code> выводится progress уровня <code>summary</code>: этапы, начало и завершение сбора каждого inventory-узла, Kubernetes API, Prometheus и построение отчёта. Уровень <code>detail</code> дополнительно перечисляет категории node evidence и результат каждого Kubernetes API source. <code>stdout</code> по-прежнему содержит только путь к collection, поэтому автоматический разбор не меняется:
 
@@ -362,13 +388,18 @@ Host evidence сохранится, но структурные Kubernetes-пр�
 | <code>normalized-events.json.gz</code> | Нормализованные записи, offline message insights, fingerprints и корреляции; конфиденциально. |
 | <code>facts.json</code> | Выведенные структурированные факты. |
 | <code>findings.json</code> | Машиночитаемые срабатывания правил. |
+| <code>causal-graph.json</code> | Ограниченный топологический граф, причинные связи, диапазонные сигналы и ранжированные гипотезы. |
 | <code>report.json</code> | Общий машиночитаемый отчёт. |
 | <code>report.md</code> | Основной отчёт администратора. |
+| <code>baseline-comparison.json</code> | Машиночитаемые отличия от baseline; создаётся только при сравнении. |
+| <code>baseline-comparison.md</code> | Русское объяснение отличий и рекомендуемых действий; создаётся только при сравнении. |
 | <code>manifest.json</code> | Размеры и SHA-256 файлов. |
 
 Inventory alias и имя Kubernetes Node могут отличаться. Однозначные hostname/FQDN и уникальные short-name совпадения канонизируются к имени Kubernetes Node для Node-scoped correlation; неоднозначные identity остаются видимым mismatch.
 
-Полнота фиксируется для каждой команды узла, группы журналов Pod, источника Kubernetes и отдельной записи журналов Kubernetes. Успешный родительский набор не скрывает внутреннюю ошибку, превышение времени или усечение. В `facts.json`, `findings.json` и `report.json` сохраняются стабильные машинные статусы. В Markdown они переводятся на русский, одинаковые проблемы группируются по узлам, а полный список по каждой проверке не печатается. Отказ Events влияет только на проверки, которым нужны события, но не на проверку состояния Node при успешно собранных объектах Node.
+Полнота фиксируется для каждой команды узла, группы журналов Pod, источника Kubernetes, запроса Prometheus и отдельной записи журналов Kubernetes. Успешный родительский набор не скрывает внутреннюю ошибку, превышение времени или усечение. В `facts.json`, `findings.json` и `report.json` сохраняются стабильные машинные статусы. Проблема получает состояние <code>active</code>, <code>resolved</code> или <code>unknown</code> и роль <code>possible_cause</code>, <code>consequence</code> или <code>configuration_risk</code>; в Markdown используются русские названия. Старая журнальная строка без подтверждения текущим состоянием не объявляется активной. В режиме check завершившиеся проблемы скрыты из Markdown, но сохранены в JSON. Отказ Events влияет только на проверки, которым нужны события, но не на проверку состояния Node при успешно собранных объектах Node.
+
+Причинный граф связывает Node → Pod → workload/EndpointSlice → Service и CSI → PV → PVC → Pod, а также зависимости etcd/API server/runtime/Cilium. Связь «может объяснять» создаётся только когда объект следствия достижим от объекта возможной причины. Рейтинг использует важность, состояние, роль, уверенность, число связанных следствий, противоречия и недоступные проверки. Балл — приоритет проверки, а не вероятность и не доказательство первопричины.
 
 Сводка Markdown объясняет, почему проверки не выполнены и сколько проверок зависит от каждого отсутствующего источника; полный технический список остаётся в `report.json`. При намеренно отключённом сборе Kubernetes зависимые проверки помечаются как неприменимые. Даже недоступный Kubernetes bundle читается для сохранения точных причин отказа отдельных источников.
 
@@ -384,6 +415,40 @@ Inventory alias и имя Kubernetes Node могут отличаться. Од�
 python3.8 dist/kdiag.pyz report /var/lib/kdiag/COLLECTION_ID
 python3.8 dist/kdiag.pyz verify /var/lib/kdiag/COLLECTION_ID
 ~~~
+
+### 10.1 Создание, утверждение и применение baseline
+
+Baseline — отдельный документ, а не режим сборщика. Случайно успешный snapshot не становится нормой автоматически. Кандидат создаётся только из готовой collection с корректным <code>manifest.json</code> и сохраняется вне её каталога:
+
+~~~bash
+python3.8 dist/kdiag.pyz baseline create /var/lib/kdiag/COLLECTION_ID \
+  --name production --output /secure/baseline-candidate.json
+~~~
+
+Кандидат содержит устойчивый профиль и SHA-256 профиля, но не содержит approval и не принимается командой сравнения. Утверждение — отдельное действие с обязательным автором и новым output-файлом:
+
+~~~bash
+python3.8 dist/kdiag.pyz baseline approve /secure/baseline-candidate.json \
+  --approved-by operator@example --output /secure/baseline.json
+~~~
+
+Approval запрещён при активном critical finding или неполном обязательном source. Для документированного исключения существует отдельный <code>--override-unsafe</code>; baseline сохраняет флаг и точные причины. Существующий output не перезаписывается. Утверждённый JSON содержит SHA-256 профиля и канонического документа целиком, кроме самого поля <code>document_sha256</code>. Перед сравнением проверяются оба хеша и каноническое байтовое представление файла.
+
+~~~bash
+python3.8 dist/kdiag.pyz compare /var/lib/kdiag/NEW_COLLECTION_ID \
+  --baseline /secure/baseline.json
+~~~
+
+Результат классифицирует <code>new_problem</code>, <code>removed</code>, <code>added</code>, <code>changed</code>, <code>resolved</code> и <code>unverifiable</code>. Если источник новой collection недоступен, сравнение этого источника невозможно: его baseline-объекты не считаются удалёнными. JSON и русский Markdown записываются в collection и включаются в обновлённый manifest.
+
+Профиль включает узлы/роли/версии/ОС/architecture/cgroup, Services, стабильные workloads, StorageClass/CSI, control-plane/etcd и DNS-топологию vanilla/Deckhouse, Cilium configuration, системные компоненты/images, конфигурационные SHA-256 и активные findings по rule ID. Он исключает timestamps, UID, IP/PID, Lease times, строки logs, Job/ReplicaSet и случайные Pod suffix. Новый snapshot можно сравнить тем же кодом сразу после сбора:
+
+~~~bash
+python3.8 dist/kdiag.pyz snapshot -i inventory.ini --config config/snapshot.json \
+  --baseline /secure/baseline.json -o /var/lib/kdiag
+~~~
+
+Baseline хранится как локальный файл. Внешнего хранилища и автоматического обучения нормы нет; изменение нормы требует нового create/approve.
 
 ## 11. Интерпретация, нормализация и корреляция
 
@@ -709,7 +774,7 @@ python3.8 dist/kdiag.pyz llm import-response /secure/google-response.txt \
 - Approximate heavy hitters могут не сохранить редкое неизвестное сообщение.
 - Окно 15 минут может пропустить медленный инцидент или связать совпавшие симптомы.
 - Автоматические и синтетические тесты не заменяют canary на точных сборках RED OS 7.x, ядра, runtime, Cilium, KESL и Kubernetes.
-- Baseline и continuous watch в эту версию не входят.
+- Continuous watch в эту версию не входит; baseline применяется только явно к разовым коллекциям и не обучается автоматически.
 
 ## 17. Происхождение и сопровождение правил
 

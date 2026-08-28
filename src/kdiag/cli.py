@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 
 from kdiag import __version__
+from kdiag.analysis import resolve_analysis_window
+from kdiag.baseline import approve_candidate, compare_collection, create_candidate, verify_approved_baseline
 from kdiag.bundle import verify_manifest, write_manifest
 from kdiag.config import load_config, validate_config
 from kdiag.llm_client import DEFAULT_LOCAL_ENDPOINT, DEFAULT_LOCAL_TIMEOUT_SECONDS, DEFAULT_MAX_OUTPUT_TOKENS, analyze_local
@@ -40,6 +42,11 @@ def _parser():
     snapshot.add_argument("--remote-python", help="абсолютный путь Python 3.8 на узлах")
     snapshot.add_argument("--parallelism", type=int, help="число одновременно собираемых узлов")
     snapshot.add_argument("--since-hours", type=int, help="глубина журналов")
+    snapshot.add_argument("--purpose", choices=("check", "incident"), help="цель анализа; по умолчанию check")
+    incident_window = snapshot.add_mutually_exclusive_group()
+    incident_window.add_argument("--incident-since", help="окно до текущего времени: например 30m, 2h или 1d")
+    incident_window.add_argument("--incident-start", help="начало инцидента в ISO-8601 UTC")
+    snapshot.add_argument("--incident-end", help="конец инцидента в ISO-8601 UTC; по умолчанию текущее время")
     snapshot.add_argument("--application-namespace", action="append", default=None, help="разрешить прикладной namespace; можно повторять")
     snapshot.add_argument("--skip-cgroup", action="store_true", help="не собирать cgroup facts и не выполнять cgroup checks")
     snapshot.add_argument(
@@ -48,9 +55,12 @@ def _parser():
         default="summary",
         help="уровень отображения хода сбора; вывод идёт в stderr",
     )
+    snapshot.add_argument("--baseline", help="утверждённый baseline для сравнения нового snapshot")
 
     node = subparsers.add_parser("node-snapshot", help=argparse.SUPPRESS)
     node.add_argument("--since-hours", type=int, required=True)
+    node.add_argument("--journal-since")
+    node.add_argument("--journal-until")
     node.add_argument("--command-timeout-seconds", type=int, required=True)
     node.add_argument("--max-command-bytes", type=int, required=True)
     node.add_argument("--pod-log-tail-bytes", type=int, required=True)
@@ -66,6 +76,26 @@ def _parser():
 
     verify = subparsers.add_parser("verify", help="проверить полноту и SHA-256 файлов collection")
     verify.add_argument("collection_dir")
+
+    baseline = subparsers.add_parser("baseline", help="создать или утвердить baseline")
+    baseline_commands = baseline.add_subparsers(dest="baseline_command", required=True)
+    baseline_create = baseline_commands.add_parser("create", help="создать кандидата из готовой collection")
+    baseline_create.add_argument("collection_dir")
+    baseline_create.add_argument("--name", required=True, help="имя baseline")
+    baseline_create.add_argument("--output", "-o", required=True, help="новый JSON-файл кандидата")
+    baseline_approve = baseline_commands.add_parser("approve", help="явно утвердить кандидата")
+    baseline_approve.add_argument("candidate")
+    baseline_approve.add_argument("--approved-by", required=True, help="автор утверждения")
+    baseline_approve.add_argument("--output", "-o", required=True, help="новый JSON-файл baseline")
+    baseline_approve.add_argument(
+        "--override-unsafe",
+        action="store_true",
+        help="явно утвердить при critical findings или существенных пробелах; причина сохранится в документе",
+    )
+
+    compare = subparsers.add_parser("compare", help="сравнить collection с утверждённым baseline")
+    compare.add_argument("collection_dir")
+    compare.add_argument("--baseline", required=True, help="утверждённый baseline JSON")
 
     rules = subparsers.add_parser("rules", help="просмотреть автономный каталог правил")
     rule_commands = rules.add_subparsers(dest="rules_command", required=True)
@@ -136,6 +166,20 @@ def _snapshot_config(arguments):
         config["collection"]["parallelism"] = arguments.parallelism
     if arguments.since_hours is not None:
         config["collection"]["since_hours"] = arguments.since_hours
+    purpose = arguments.purpose or config["analysis"]["purpose"]
+    if arguments.purpose == "check":
+        config["analysis"].update(resolve_analysis_window("check"))
+    elif arguments.incident_since or arguments.incident_start or arguments.incident_end or purpose == "incident":
+        configured_start = None if arguments.incident_since else arguments.incident_start or config["analysis"].get("incident_start")
+        configured_end = None if arguments.incident_since else arguments.incident_end or config["analysis"].get("incident_end")
+        config["analysis"].update(
+            resolve_analysis_window(
+                purpose,
+                incident_since=arguments.incident_since,
+                incident_start=configured_start,
+                incident_end=configured_end,
+            )
+        )
     if arguments.skip_cgroup:
         config["collection"]["collect_cgroup"] = False
     if arguments.application_namespace is not None:
@@ -160,6 +204,8 @@ def main(argv=None):
     arguments = _parser().parse_args(argv)
     try:
         if arguments.command == "snapshot":
+            if arguments.baseline:
+                verify_approved_baseline(arguments.baseline)
             config = _snapshot_config(arguments)
             collection_dir, status = run_snapshot(
                 arguments.inventory,
@@ -167,6 +213,7 @@ def main(argv=None):
                 arguments.output_dir,
                 config,
                 progress=_progress_callback(arguments.progress),
+                baseline_path=arguments.baseline,
             )
             print(str(collection_dir))
             return 0 if status == "complete" else 1
@@ -184,6 +231,8 @@ def main(argv=None):
                 arguments.pod_log_max_files,
                 arguments.collect_etcd,
                 not arguments.skip_cgroup,
+                arguments.journal_since,
+                arguments.journal_until,
             )
             sys.stdout.buffer.write(gzip_json_bytes(snapshot))
             sys.stdout.buffer.flush()
@@ -196,6 +245,23 @@ def main(argv=None):
         if arguments.command == "verify":
             result = verify_manifest(arguments.collection_dir)
             print("verified {0} members".format(result["members"]))
+            return 0
+        if arguments.command == "baseline":
+            if arguments.baseline_command == "create":
+                create_candidate(arguments.collection_dir, arguments.name, arguments.output)
+                print(str(Path(arguments.output).resolve()))
+                return 0
+            approve_candidate(
+                arguments.candidate,
+                arguments.approved_by,
+                arguments.output,
+                override_unsafe=arguments.override_unsafe,
+            )
+            print(str(Path(arguments.output).resolve()))
+            return 0
+        if arguments.command == "compare":
+            result = compare_collection(arguments.collection_dir, arguments.baseline)
+            print(str(result["json"]))
             return 0
         if arguments.command == "rules":
             if arguments.rules_command == "list":

@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from kdiag import __version__
+from kdiag.baseline import compare_collection, verify_approved_baseline
 from kdiag.bundle import write_manifest
 from kdiag.inventory import load_ansible_inventory
 from kdiag.kubernetes import KubectlCollector, collect_prometheus, snapshot_status
@@ -55,6 +56,10 @@ def _node_arguments(config):
         arguments.append("--collect-etcd")
     if not collection["collect_cgroup"]:
         arguments.append("--skip-cgroup")
+    analysis = config.get("analysis", {})
+    if analysis.get("purpose") == "incident":
+        arguments.extend(["--journal-since", analysis["incident_start"]])
+        arguments.extend(["--journal-until", analysis["incident_end"]])
     for namespace in config["kubernetes"]["system_namespaces"]:
         arguments.extend(["--system-namespace", namespace])
     for namespace in config["kubernetes"]["application_namespaces"]:
@@ -76,7 +81,9 @@ def _preflight_disk(output_root, host_count, config):
         raise RuntimeError("not enough free disk: required at least {0} bytes, available {1}".format(required, free))
 
 
-def run_snapshot(inventory_path, group, output_root, config, progress=None):
+def run_snapshot(inventory_path, group, output_root, config, progress=None, baseline_path=None):
+    if baseline_path:
+        verify_approved_baseline(baseline_path)
     started_at = utc_now()
     collection_id = _collection_id()
     _emit_progress(progress, "summary", "collection {0}: initialization".format(collection_id))
@@ -177,6 +184,7 @@ def run_snapshot(inventory_path, group, output_root, config, progress=None):
                 config["kubernetes"]["log_tail_lines"],
                 config["kubernetes"]["max_log_pods"],
                 config["kubernetes"]["max_log_bytes"],
+                log_since_time=config["analysis"].get("incident_start"),
             )
             kube_status = snapshot_status(snapshot, config["kubernetes"]["collect_system_logs"])
             path = collection_dir / "kubernetes.json.gz"
@@ -197,6 +205,8 @@ def run_snapshot(inventory_path, group, output_root, config, progress=None):
         config["prometheus"]["max_response_bytes"],
         username=config["prometheus"].get("username"),
         password=config["prometheus"].get("password"),
+        range_start=config["analysis"].get("incident_start"),
+        range_end=config["analysis"].get("incident_end"),
     )
     prometheus_path = collection_dir / "prometheus.json.gz"
     atomic_write_gzip_json(prometheus_path, prometheus_snapshot)
@@ -209,7 +219,7 @@ def run_snapshot(inventory_path, group, output_root, config, progress=None):
     collection = {
         "schema_version": SCHEMA_VERSION,
         "collector_version": __version__,
-        "kind": "incident_collection",
+        "kind": "diagnostic_collection",
         "collection_id": collection_id,
         "status": collection_status,
         "started_at": started_at,
@@ -218,6 +228,9 @@ def run_snapshot(inventory_path, group, output_root, config, progress=None):
         "options": {
             "collect_cgroup": config["collection"]["collect_cgroup"],
             "collect_etcd": config["collection"]["collect_etcd"],
+            "purpose": config["analysis"]["purpose"],
+            "incident_start": config["analysis"].get("incident_start"),
+            "incident_end": config["analysis"].get("incident_end"),
         },
         "limits": {
             "max_node_bundle_bytes": config["collection"]["max_node_bundle_bytes"],
@@ -230,6 +243,16 @@ def run_snapshot(inventory_path, group, output_root, config, progress=None):
     atomic_write_json(collection_dir / "collection.json", collection)
     _emit_progress(progress, "summary", "analysis: normalization, rules and reports")
     build_report(collection_dir)
-    write_manifest(collection_dir)
+    try:
+        if baseline_path:
+            _emit_progress(progress, "summary", "baseline: comparison with approved profile")
+            compare_collection(
+                collection_dir,
+                baseline_path,
+                verify_collection_integrity=False,
+                update_collection_manifest=False,
+            )
+    finally:
+        write_manifest(collection_dir)
     _emit_progress(progress, "summary", "collection {0}: {1}".format(collection_id, collection_status))
     return collection_dir, collection_status

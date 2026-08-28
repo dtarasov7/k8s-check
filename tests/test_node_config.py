@@ -15,6 +15,20 @@ class NodeConfigTest(unittest.TestCase):
         self.assertIn("--reverse", commands["journal_services_current"])
         self.assertIn("--reverse", commands["journal_kernel_current"])
 
+    def test_incident_journals_use_absolute_window_without_previous_boot_duplicate(self):
+        commands = {
+            check_id: argv
+            for check_id, argv, _sensitivity in _command_specs(
+                24,
+                journal_since="2026-08-27T10:00:00Z",
+                journal_until="2026-08-27T11:00:00Z",
+            )
+        }
+        self.assertIn("2026-08-27T10:00:00Z", commands["journal_services_current"])
+        self.assertIn("2026-08-27T11:00:00Z", commands["journal_services_current"])
+        self.assertNotIn("journal_services_previous", commands)
+        self.assertNotIn("journal_kernel_previous", commands)
+
     def test_authentication_config_probe_collects_metadata_not_content(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "authentication-config.yaml"

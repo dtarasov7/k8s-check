@@ -405,6 +405,20 @@ def _finalize_fingerprint(entry):
 def _append(events, unknown, stats, event):
     stats["input_records"] += 1
     stats["source_records"][event["source"]] += 1
+    timestamp_epoch = event.get("timestamp_epoch")
+    if (
+        not event.get("timestamp_inferred")
+        and timestamp_epoch is not None
+        and (
+            stats.get("_incident_start_epoch") is not None
+            and timestamp_epoch < stats["_incident_start_epoch"]
+            or stats.get("_incident_end_epoch") is not None
+            and timestamp_epoch > stats["_incident_end_epoch"]
+        )
+    ):
+        stats["incident_window_filtered_records"] += int(event.get("occurrence_count") or 1)
+        stats["dropped_by_source"][event["source"]] += 1
+        return
     if (
         set(event.get("categories", ())) & DNS_ERROR_CATEGORIES
         and DNS_COMPONENT_RE.search(str(event.get("component") or ""))
@@ -938,11 +952,16 @@ def normalize_evidence(collection, node_snapshots, kubernetes):
         "candidate_limit_drops": 0,
         "output_limit_drops": 0,
         "deduplicated_records": 0,
+        "incident_window_filtered_records": 0,
         "source_records": Counter(),
         "category_records": Counter(),
         "dropped_by_source": Counter(),
         "truncated": False,
     }
+    options = collection.get("options", {}) or {}
+    if options.get("purpose") == "incident":
+        stats["_incident_start_epoch"] = _epoch(options.get("incident_start"))
+        stats["_incident_end_epoch"] = _epoch(options.get("incident_end"))
     kubernetes_nodes = kubernetes.get("sources", {}).get("nodes", {}).get("data", {}).get("items", []) or []
     node_identity_map = match_node_identities(node_snapshots, kubernetes_nodes)
     for inventory_name, snapshot in sorted(node_snapshots.items()):
@@ -978,6 +997,8 @@ def normalize_evidence(collection, node_snapshots, kubernetes):
     stats["source_records"] = dict(stats["source_records"])
     stats["category_records"] = dict(stats["category_records"])
     stats["dropped_by_source"] = dict(stats["dropped_by_source"])
+    stats.pop("_incident_start_epoch", None)
+    stats.pop("_incident_end_epoch", None)
     return {
         "schema_version": 1,
         "kind": "normalized_events",

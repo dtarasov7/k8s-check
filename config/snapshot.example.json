@@ -1,5 +1,10 @@
 {
   "schema_version": 1,
+  "analysis": {
+    "purpose": "check",
+    "incident_start": null,
+    "incident_end": null
+  },
   "collection": {
     "since_hours": 24,
     "parallelism": 2,
